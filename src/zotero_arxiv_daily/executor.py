@@ -89,7 +89,114 @@ class Executor:
             logger.info(f"Selected {len(corpus)} zotero papers:\n{samples}\n...")
         return corpus
 
-    
+    @staticmethod
+    def _ensure_collection(zot, path: str) -> str:
+        """Resolve a collection by its '/'-separated path, creating missing levels. Returns the collection key."""
+        names = [p for p in path.split('/') if p]
+        if not names:
+            raise ValueError(f"Invalid zotero.save_collection: {path!r}")
+        collections = zot.everything(zot.collections())
+        by_key = {c['key']: c for c in collections}
+
+        def full_path(c: dict) -> str:
+            parent = c['data']['parentCollection']
+            if parent and parent in by_key:
+                return full_path(by_key[parent]) + '/' + c['data']['name']
+            return c['data']['name']
+
+        existing = {full_path(c): c['key'] for c in collections}
+        parent_key = None
+        cur = ''
+        for name in names:
+            cur = f"{cur}/{name}" if cur else name
+            if cur in existing:
+                parent_key = existing[cur]
+                continue
+            payload = {'name': name}
+            if parent_key:
+                payload['parentCollection'] = parent_key
+            resp = zot.create_collections([payload])
+            key = resp['successful']['0']['key']
+            logger.info(f"Created Zotero collection '{cur}' ({key})")
+            existing[cur] = key
+            parent_key = key
+        return parent_key
+
+    @staticmethod
+    def _existing_identifiers(zot, collection_key: str) -> set[str]:
+        """Collect archiveIDs and urls already present in the collection, for de-duplication."""
+        items = zot.everything(zot.collection_items_top(collection_key))
+        identifiers: set[str] = set()
+        for it in items:
+            data = it.get('data', {})
+            for field in ('archiveID', 'url'):
+                if data.get(field):
+                    identifiers.add(data[field])
+        return identifiers
+
+    @staticmethod
+    def _split_creator(name: str) -> dict:
+        parts = name.strip().split()
+        if len(parts) >= 2:
+            return {'creatorType': 'author', 'firstName': ' '.join(parts[:-1]), 'lastName': parts[-1]}
+        return {'creatorType': 'author', 'name': name}
+
+    def _paper_to_item(self, paper, template: dict, collection_key: str) -> tuple[dict, list[str]]:
+        item = dict(template)
+        item['title'] = paper.title
+        item['abstractNote'] = paper.abstract or ''
+        item['url'] = paper.url or ''
+        item['creators'] = [self._split_creator(a) for a in (paper.authors or [])]
+        item['collections'] = [collection_key]
+        identifiers = [paper.url] if paper.url else []
+        if paper.source == 'arxiv' and paper.url:
+            arxiv_id = paper.url.rsplit('/abs/', 1)[-1].rsplit('/', 1)[-1]
+            item['repository'] = 'arXiv'
+            item['archiveID'] = f'arXiv:{arxiv_id}'
+            identifiers.append(item['archiveID'])
+        else:
+            item['repository'] = paper.source
+        extra = []
+        if paper.tldr:
+            extra.append(f'TLDR: {paper.tldr}')
+        if paper.score is not None:
+            extra.append(f'Relevance score: {paper.score:.4f}')
+        if paper.affiliations:
+            extra.append('Affiliations: ' + ', '.join(paper.affiliations))
+        if extra:
+            item['extra'] = '\n'.join(extra)
+        return item, identifiers
+
+    def save_to_zotero(self, papers: list) -> None:
+        save_collection = self.config.zotero.get("save_collection", None)
+        if not save_collection or not papers:
+            return
+        papers = papers[:self.config.zotero.get("save_top_k", 10)]  # papers arrive sorted by relevance, descending
+        try:
+            zot = zotero.Zotero(self.config.zotero.user_id, 'user', self.config.zotero.api_key)
+            collection_key = self._ensure_collection(zot, save_collection)
+            existing = self._existing_identifiers(zot, collection_key)
+            template = zot.item_template('preprint')
+            items = []
+            for p in papers:
+                item, identifiers = self._paper_to_item(p, template, collection_key)
+                if any(i in existing for i in identifiers):
+                    continue
+                items.append(item)
+                existing.update(identifiers)
+            if not items:
+                logger.info(f"All {len(papers)} papers already exist in '{save_collection}', nothing to add")
+                return
+            created = 0
+            for i in range(0, len(items), 50):  # Zotero write API accepts up to 50 items per request
+                resp = zot.create_items(items[i:i + 50])
+                created += len(resp.get('successful', {}))
+                if resp.get('failed'):
+                    logger.warning(f"Failed to add {len(resp['failed'])} items to Zotero: {resp['failed']}")
+            logger.info(f"Added {created} papers to Zotero collection '{save_collection}'")
+        except Exception as e:
+            logger.error(f"Failed to save papers to Zotero: {e}")
+
     def run(self):
         corpus = self.fetch_zotero_corpus()
         corpus = self.filter_corpus(corpus)
@@ -115,6 +222,7 @@ class Executor:
             for p in tqdm(reranked_papers):
                 p.generate_tldr(self.openai_client, self.config.llm)
                 p.generate_affiliations(self.openai_client, self.config.llm)
+            self.save_to_zotero(reranked_papers)
         elif not self.config.executor.send_empty:
             logger.info("No new papers found. No email will be sent.")
             return
