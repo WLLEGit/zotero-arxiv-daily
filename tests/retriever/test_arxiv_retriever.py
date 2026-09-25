@@ -63,6 +63,30 @@ def test_arxiv_retriever(config, mock_feedparser, monkeypatch):
     assert set(p.title for p in papers) == set(e.title for e in new_entries)
 
 
+def test_arxiv_api_406_uses_rss_metadata(config, mock_feedparser, monkeypatch):
+    selected = [
+        entry for entry in mock_feedparser.entries
+        if entry.get("arxiv_announce_type", "new") == "new"
+    ]
+
+    class RejectingClient:
+        def __init__(self, **kwargs):
+            pass
+
+        def results(self, search):
+            raise arxiv_retriever.arxiv.HTTPError("https://export.arxiv.org/api/query", 0, 406)
+
+    monkeypatch.setattr(arxiv_retriever.arxiv, "Client", RejectingClient)
+    results = ArxivRetriever(config)._retrieve_raw_papers()
+
+    assert len(results) == len(selected)
+    assert results[0].entry_id.endswith(selected[0].id.removeprefix("oai:arXiv.org:"))
+    assert results[0].summary == selected[0].summary.partition("Abstract:")[2].strip()
+    assert results[0].authors[0].name == selected[0].author.split(",")[0]
+    assert results[0].pdf_url.endswith(selected[0].id.removeprefix("oai:arXiv.org:"))
+    assert results[0].source_url() is not None
+
+
 def test_run_with_hard_timeout_returns_value():
     result = _run_with_hard_timeout(
         _sleep_and_return, ("done", 0.01), timeout=1, operation="test op", paper_title="paper"

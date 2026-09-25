@@ -106,6 +106,26 @@ def _extract_text_from_tar_worker(source_url: str, paper_id: str, paper_title: s
         return file_contents["all"]
 
 
+def _result_from_rss_entry(entry: feedparser.FeedParserDict) -> ArxivResult:
+    """Use the metadata already present in the RSS feed if the API rejects us."""
+    paper_id = entry.id.removeprefix("oai:arXiv.org:")
+    abstract = entry.summary.partition("Abstract:")[2].strip()
+    if not abstract:
+        raise ValueError(f"Missing abstract in arXiv RSS entry {paper_id}")
+    authors = [
+        arxiv.Result.Author(name.strip())
+        for name in entry.get("author", "").split(",")
+        if name.strip()
+    ]
+    return arxiv.Result(
+        entry_id=f"https://arxiv.org/abs/{paper_id}",
+        title=entry.title,
+        authors=authors,
+        summary=abstract,
+        links=[arxiv.Result.Link(f"https://arxiv.org/pdf/{paper_id}", title="pdf")],
+    )
+
+
 @register_retriever("arxiv")
 class ArxivRetriever(BaseRetriever):
     def __init__(self, config):
@@ -123,13 +143,13 @@ class ArxivRetriever(BaseRetriever):
             raise Exception(f"Invalid ARXIV_QUERY: {query}.")
         raw_papers = []
         allowed_announce_types = {"new", "cross"} if include_cross_list else {"new"}
-        all_paper_ids = [
-            i.id.removeprefix("oai:arXiv.org:")
-            for i in feed.entries
-            if i.get("arxiv_announce_type", "new") in allowed_announce_types
+        selected_entries = [
+            entry for entry in feed.entries
+            if entry.get("arxiv_announce_type", "new") in allowed_announce_types
         ]
         if self.config.executor.debug:
-            all_paper_ids = all_paper_ids[:10]
+            selected_entries = selected_entries[:10]
+        all_paper_ids = [entry.id.removeprefix("oai:arXiv.org:") for entry in selected_entries]
 
         # Get full information of each paper from arxiv api
         bar = tqdm(total=len(all_paper_ids))
@@ -144,6 +164,10 @@ class ArxivRetriever(BaseRetriever):
                     raw_papers.extend(batch)
                     break
                 except arxiv.HTTPError as exc:
+                    if exc.status == 406:
+                        logger.warning("arXiv API returned 406; using RSS metadata for today's papers")
+                        bar.close()
+                        return [_result_from_rss_entry(entry) for entry in selected_entries]
                     if exc.status == 429 and attempt < max_batch_retries - 1:
                         wait = batch_retry_delay * (attempt + 1)
                         logger.warning(f"arXiv API 429 on batch {i // 20}, retry {attempt + 1}/{max_batch_retries} in {wait}s")
