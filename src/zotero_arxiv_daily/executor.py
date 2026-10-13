@@ -11,6 +11,10 @@ from .construct_email import render_email
 from .utils import send_email
 from openai import OpenAI
 from tqdm import tqdm
+from .analysis import (
+    NOTE_TAG, canonical_identifier, generate_analysis, has_analysis,
+    item_identifiers, stable_item_key,
+)
 
 
 def normalize_path_patterns(patterns: list[str] | ListConfig | None, config_key: str) -> list[str] | None:
@@ -123,16 +127,47 @@ class Executor:
         return parent_key
 
     @staticmethod
-    def _existing_identifiers(zot, collection_key: str) -> set[str]:
-        """Collect archiveIDs and urls already present in the collection, for de-duplication."""
+    def _existing_papers(zot, collection_key: str) -> dict[str, dict]:
+        """Prefer target-collection items; reuse papers elsewhere in the library."""
         items = zot.everything(zot.collection_items_top(collection_key))
-        identifiers: set[str] = set()
-        for it in items:
-            data = it.get('data', {})
-            for field in ('archiveID', 'url'):
-                if data.get(field):
-                    identifiers.add(data[field])
-        return identifiers
+        items += zot.everything(zot.items(itemType='conferencePaper || journalArticle || preprint'))
+        existing = {}
+        for item in items:
+            if item.get('data', {}).get('deleted') or not item.get('key'):
+                continue
+            for identifier in item_identifiers(item):
+                existing.setdefault(identifier, item)
+        return existing
+
+    @staticmethod
+    def _created_key(response: dict) -> str:
+        successful = response.get('successful', {}).get('0')
+        if successful:
+            return successful['key']
+        # Zotero returns keys (not full items) for unchanged writes.
+        key = response.get('unchanged', {}).get('0') or response.get('success', {}).get('0')
+        if key:
+            return key
+        raise RuntimeError(f"Zotero item creation failed: {response.get('failed', {})}")
+
+    def _save_analysis_note(self, zot, paper, parent_key: str) -> None:
+        children = zot.everything(zot.children(parent_key))
+        if has_analysis(children):
+            logger.info(f"Chinese analysis already exists for {paper.url}; skipping")
+            return
+        note_html = generate_analysis(self.openai_client, paper, self.config.llm)
+        # A different daily run may have completed during the LLM request.
+        if has_analysis(zot.everything(zot.children(parent_key))):
+            return
+        note = dict(zot.item_template('note'))
+        note.update({
+            'key': stable_item_key(f'{self.config.zotero.user_id}:{parent_key}:{NOTE_TAG}'),
+            'parentItem': parent_key,
+            'note': note_html,
+            'tags': [{'tag': NOTE_TAG}],
+        })
+        self._created_key(zot.create_items([note]))
+        logger.info(f"Saved Chinese analysis child note for {paper.url}")
 
     @staticmethod
     def _split_creator(name: str) -> dict:
@@ -171,29 +206,42 @@ class Executor:
         save_collection = self.config.zotero.get("save_collection", None)
         if not save_collection or not papers:
             return
-        papers = papers[:self.config.zotero.get("save_top_k", 10)]  # papers arrive sorted by relevance, descending
+        top_k = self.config.zotero.get("save_top_k", 10)
+        if type(top_k) is not int or top_k < 0:
+            logger.error("zotero.save_top_k must be a non-negative integer")
+            return
+        papers = papers[:top_k]  # papers arrive sorted by relevance, descending
+        if not papers:
+            return
         try:
             zot = zotero.Zotero(self.config.zotero.user_id, 'user', self.config.zotero.api_key)
             collection_key = self._ensure_collection(zot, save_collection)
-            existing = self._existing_identifiers(zot, collection_key)
+            existing = self._existing_papers(zot, collection_key)
             template = zot.item_template('preprint')
-            items = []
             for p in papers:
-                item, identifiers = self._paper_to_item(p, template, collection_key)
-                if any(i in existing for i in identifiers):
-                    continue
-                items.append(item)
-                existing.update(identifiers)
-            if not items:
-                logger.info(f"All {len(papers)} papers already exist in '{save_collection}', nothing to add")
-                return
-            created = 0
-            for i in range(0, len(items), 50):  # Zotero write API accepts up to 50 items per request
-                resp = zot.create_items(items[i:i + 50])
-                created += len(resp.get('successful', {}))
-                if resp.get('failed'):
-                    logger.warning(f"Failed to add {len(resp['failed'])} items to Zotero: {resp['failed']}")
-            logger.info(f"Added {created} papers to Zotero collection '{save_collection}'")
+                try:
+                    item, identifiers = self._paper_to_item(p, template, collection_key)
+                    identifiers = [canonical_identifier(i) for i in identifiers]
+                    parent = next((existing[i] for i in identifiers if i in existing), None)
+                    if parent is None:
+                        item['key'] = stable_item_key(f'{self.config.zotero.user_id}:{p.source}:{identifiers[0]}')
+                        parent_key = self._created_key(zot.create_items([item]))
+                        parent = zot.item(parent_key)
+                        for identifier in identifiers:
+                            existing[identifier] = parent
+                    else:
+                        parent_key = parent['key']
+                        if collection_key not in parent['data'].get('collections', []):
+                            response = zot.addto_collection(collection_key, parent)
+                            response.raise_for_status()
+                            parent = zot.item(parent_key)
+                            for identifier in identifiers:
+                                existing[identifier] = parent
+                    self._save_analysis_note(zot, p, parent_key)
+                except Exception as e:
+                    # A failed note must not block other papers or mark this one
+                    # completed. The existing parent can receive a note on retry.
+                    logger.warning(f"Failed to sync paper/analysis for {p.url}: {e}")
         except Exception as e:
             logger.error(f"Failed to save papers to Zotero: {e}")
 
@@ -222,7 +270,6 @@ class Executor:
             for p in tqdm(reranked_papers):
                 p.generate_tldr(self.openai_client, self.config.llm)
                 p.generate_affiliations(self.openai_client, self.config.llm)
-            self.save_to_zotero(reranked_papers)
         elif not self.config.executor.send_empty:
             logger.info("No new papers found. No email will be sent.")
             return
@@ -230,3 +277,4 @@ class Executor:
         email_content = render_email(reranked_papers)
         send_email(self.config, email_content)
         logger.info("Email sent successfully")
+        self.save_to_zotero(reranked_papers)

@@ -179,6 +179,33 @@ cd zotero-arxiv-daily
 uv run main.py
 ```
 
+### Chinese research notes in Zotero
+
+When the existing `zotero.save_collection` is set, the same top-scoring papers
+selected by `zotero.save_top_k` (default 10) receive a detailed Chinese child note.
+No additional configuration is needed. Analysis reuses the existing LLM client,
+model and generation options; email HTML, TLDR settings and SMTP are unchanged.
+The email is sent before note generation. The Zotero key needs library write access.
+
+Existing papers are reused across the library by URL/archive ID, with arXiv
+versions and abs/PDF URLs matched to one parent. Personal notes and metadata are
+preserved. A dedicated note tag prevents repeated generation, including on new
+arXiv versions; completed notes are not automatically refreshed. Only the current
+selected papers are backfilled, not historical collection contents.
+
+Token budgets are internal constants: 24,000 input, 8,000 per source chunk and
+8,000 output tokens. Long papers use fact extraction for every chunk followed by
+synthesis; input is not silently truncated. Missing full text, incomplete output,
+invalid evidence or a failed write leaves the note eligible for retry when the
+paper is selected again. Stable item keys prevent duplicate writes after a lost
+response. Failures are isolated per paper.
+
+Notes include mechanisms, experimental conditions/results, limitations and
+original-source evidence. Source block numbers are not page numbers; extracted
+text may omit figures/tables/formulas, and quote matching does not establish that
+the interpretation is correct. Detailed generation adds model cost and latency.
+Tests (`uv run pytest`) do not send live LLM, SMTP or Zotero requests.
+
 ## 🚀 Sync with the latest version
 This project is in active development. You can subscribe this repo via `Watch` so that you can be notified once we publish new release.
 
