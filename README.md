@@ -179,6 +179,69 @@ cd zotero-arxiv-daily
 uv run main.py
 ```
 
+### Chinese research notes in Zotero
+
+Set the following in your existing `CUSTOM_CONFIG` (keep its other settings):
+
+```yaml
+zotero:
+  save_collection: DailyArxiv
+  save_top_k: 10
+```
+
+After sending the existing email, the workflow syncs these highest-scoring papers
+and adds a **Chinese detailed analysis** child note to each paper. Email HTML,
+TLDR language/model and SMTP settings are unchanged. The Zotero API key must have
+library write access; notes do not require file-storage uploads.
+
+Existing papers are matched across the library by URL/archive ID; arXiv versions,
+HTTP/HTTPS and abs/PDF URLs share one parent. Existing papers are added to the
+configured collection without removing their other memberships or metadata.
+Untagged personal notes are left untouched. Notes tagged
+`zotero-arxiv-daily:chinese-analysis:v1` are considered complete and skipped on
+later runs, including new arXiv versions. This preserves user edits and avoids
+another LLM charge. There is no automatic note refresh. Only papers selected in
+the current run are backfilled; historical collection contents are not scanned
+for missing analyses.
+
+Analysis always uses Chinese, independently of `llm.language`, and inherits the
+configured LLM endpoint/model unless overridden:
+
+```yaml
+llm:
+  analysis:
+    enabled: true
+    max_input_tokens: 24000
+    chunk_tokens: 8000
+    max_output_tokens: 8000
+    generation_kwargs: {} # Optional model/temperature overrides
+```
+
+The note covers the research problem, mechanisms, examples, experimental
+conditions/results, limitations and research implications. Ordinary papers use
+one analysis call; long papers use one fact-extraction call per text chunk plus
+a final synthesis call. All extracted text is processed, rather than taking the
+first 4,000 tokens. Token estimates use `o200k_base`, not a provider-specific
+tokenizer; leave headroom for the configured model's context window. Inputs that
+still exceed the budget fail explicitly rather than silently losing the tail.
+
+Missing full text, incomplete/invalid model responses and evidence quotes absent
+from the extracted source do not produce a completed note. A failed note leaves
+the parent paper available for retry when it is selected again. Stable item keys
+also prevent duplicate parent/child creation after an ambiguous write response.
+Per-paper failures do not stop the remaining papers. The note includes model,
+coverage information and original-source quotes: block labels are not page
+numbers, extraction can omit figures/tables/formulas, and quote validation does
+not prove the correctness of the interpretation. Detailed-note token cost and
+latency are additional to existing TLDR generation; disabling
+`llm.analysis.enabled` retains paper syncing.
+
+Tests run without live LLM, SMTP or Zotero writes:
+
+```bash
+uv run pytest
+```
+
 ## 🚀 Sync with the latest version
 This project is in active development. You can subscribe this repo via `Watch` so that you can be notified once we publish new release.
 

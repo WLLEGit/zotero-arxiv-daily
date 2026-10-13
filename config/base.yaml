@@ -3,6 +3,8 @@ zotero:
   api_key: ??? # An Zotero API key with read access.
   include_path: null # A list of glob patterns marking the Zotero collections that should be included. Example: ["2026/survey/**","2026/reading-group/**"]
   ignore_path: null # A list of glob patterns marking the Zotero collections that should be excluded. Example: ["2026/ignore/**","archive/**"]
+  save_collection: null # Set e.g. DailyArxiv to enable syncing papers and child notes.
+  save_top_k: 10 # Sync and analyse this many highest-scoring papers; 0 disables sync.
 
 source:
   arxiv:
@@ -29,6 +31,12 @@ llm:
     max_tokens: 16384
     model: ???
   language: English # Preferred language for the TL;DR. Example: English
+  analysis:
+    enabled: true # Detailed Chinese child notes only for papers selected for Zotero sync.
+    max_input_tokens: 24000 # Estimated with o200k_base; allow provider/context headroom.
+    chunk_tokens: 8000 # Long papers are read in chunks; the tail is never truncated.
+    max_output_tokens: 8000
+    generation_kwargs: {} # Optional overrides; otherwise inherit the TLDR model/API.
 
 reranker:
   local:
