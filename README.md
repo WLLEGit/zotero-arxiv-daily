@@ -181,66 +181,30 @@ uv run main.py
 
 ### Chinese research notes in Zotero
 
-Set the following in your existing `CUSTOM_CONFIG` (keep its other settings):
+When the existing `zotero.save_collection` is set, the same top-scoring papers
+selected by `zotero.save_top_k` (default 10) receive a detailed Chinese child note.
+No additional configuration is needed. Analysis reuses the existing LLM client,
+model and generation options; email HTML, TLDR settings and SMTP are unchanged.
+The email is sent before note generation. The Zotero key needs library write access.
 
-```yaml
-zotero:
-  save_collection: DailyArxiv
-  save_top_k: 10
-```
+Existing papers are reused across the library by URL/archive ID, with arXiv
+versions and abs/PDF URLs matched to one parent. Personal notes and metadata are
+preserved. A dedicated note tag prevents repeated generation, including on new
+arXiv versions; completed notes are not automatically refreshed. Only the current
+selected papers are backfilled, not historical collection contents.
 
-After sending the existing email, the workflow syncs these highest-scoring papers
-and adds a **Chinese detailed analysis** child note to each paper. Email HTML,
-TLDR language/model and SMTP settings are unchanged. The Zotero API key must have
-library write access; notes do not require file-storage uploads.
+Token budgets are internal constants: 24,000 input, 8,000 per source chunk and
+8,000 output tokens. Long papers use fact extraction for every chunk followed by
+synthesis; input is not silently truncated. Missing full text, incomplete output,
+invalid evidence or a failed write leaves the note eligible for retry when the
+paper is selected again. Stable item keys prevent duplicate writes after a lost
+response. Failures are isolated per paper.
 
-Existing papers are matched across the library by URL/archive ID; arXiv versions,
-HTTP/HTTPS and abs/PDF URLs share one parent. Existing papers are added to the
-configured collection without removing their other memberships or metadata.
-Untagged personal notes are left untouched. Notes tagged
-`zotero-arxiv-daily:chinese-analysis:v1` are considered complete and skipped on
-later runs, including new arXiv versions. This preserves user edits and avoids
-another LLM charge. There is no automatic note refresh. Only papers selected in
-the current run are backfilled; historical collection contents are not scanned
-for missing analyses.
-
-Analysis always uses Chinese, independently of `llm.language`, and inherits the
-configured LLM endpoint/model unless overridden:
-
-```yaml
-llm:
-  analysis:
-    enabled: true
-    max_input_tokens: 24000
-    chunk_tokens: 8000
-    max_output_tokens: 8000
-    generation_kwargs: {} # Optional model/temperature overrides
-```
-
-The note covers the research problem, mechanisms, examples, experimental
-conditions/results, limitations and research implications. Ordinary papers use
-one analysis call; long papers use one fact-extraction call per text chunk plus
-a final synthesis call. All extracted text is processed, rather than taking the
-first 4,000 tokens. Token estimates use `o200k_base`, not a provider-specific
-tokenizer; leave headroom for the configured model's context window. Inputs that
-still exceed the budget fail explicitly rather than silently losing the tail.
-
-Missing full text, incomplete/invalid model responses and evidence quotes absent
-from the extracted source do not produce a completed note. A failed note leaves
-the parent paper available for retry when it is selected again. Stable item keys
-also prevent duplicate parent/child creation after an ambiguous write response.
-Per-paper failures do not stop the remaining papers. The note includes model,
-coverage information and original-source quotes: block labels are not page
-numbers, extraction can omit figures/tables/formulas, and quote validation does
-not prove the correctness of the interpretation. Detailed-note token cost and
-latency are additional to existing TLDR generation; disabling
-`llm.analysis.enabled` retains paper syncing.
-
-Tests run without live LLM, SMTP or Zotero writes:
-
-```bash
-uv run pytest
-```
+Notes include mechanisms, experimental conditions/results, limitations and
+original-source evidence. Source block numbers are not page numbers; extracted
+text may omit figures/tables/formulas, and quote matching does not establish that
+the interpretation is correct. Detailed generation adds model cost and latency.
+Tests (`uv run pytest`) do not send live LLM, SMTP or Zotero requests.
 
 ## 🚀 Sync with the latest version
 This project is in active development. You can subscribe this repo via `Watch` so that you can be notified once we publish new release.

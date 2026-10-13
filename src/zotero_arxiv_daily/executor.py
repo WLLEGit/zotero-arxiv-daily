@@ -151,8 +151,6 @@ class Executor:
         raise RuntimeError(f"Zotero item creation failed: {response.get('failed', {})}")
 
     def _save_analysis_note(self, zot, paper, parent_key: str) -> None:
-        if not self.config.llm.get('analysis', {}).get('enabled', True):
-            return
         children = zot.everything(zot.children(parent_key))
         if has_analysis(children):
             logger.info(f"Chinese analysis already exists for {paper.url}; skipping")

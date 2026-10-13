@@ -4,6 +4,7 @@ import copy
 from types import SimpleNamespace
 
 import pytest
+from omegaconf import open_dict
 
 from tests.canned_responses import make_sample_paper
 from zotero_arxiv_daily.analysis import NOTE_TAG
@@ -72,7 +73,8 @@ class Library:
 
 @pytest.fixture
 def sync(config, monkeypatch):
-    config.zotero.save_collection = "DailyArxiv"
+    with open_dict(config.zotero):
+        config.zotero.save_collection = "DailyArxiv"
     library = Library()
     monkeypatch.setattr("zotero_arxiv_daily.executor.zotero.Zotero", lambda *a, **kw: library)
     executor = Executor.__new__(Executor)
@@ -188,18 +190,17 @@ def test_duplicate_candidates_reuse_parent(sync):
     assert len(library.store) == 2 and len(analysed) == 1
 
 
-@pytest.mark.parametrize("disabled", ["collection", "count", "analysis"])
+@pytest.mark.parametrize("disabled", ["collection", "count"])
 def test_disabled_settings_do_not_generate(sync, disabled):
     executor, library, analysed = sync
     if disabled == "collection":
         executor.config.zotero.save_collection = None
     elif disabled == "count":
-        executor.config.zotero.save_top_k = 0
-    else:
-        executor.config.llm.analysis.enabled = False
+        with open_dict(executor.config.zotero):
+            executor.config.zotero.save_top_k = 0
     executor.save_to_zotero(papers(1))
     assert not analysed and not notes(library)
-    assert len(library.store) == (1 if disabled == "analysis" else 0)
+    assert not library.store
 
 
 def test_concurrent_note_created_during_generation_is_not_duplicated(sync, monkeypatch):
@@ -284,7 +285,8 @@ def test_real_clients_with_mock_http_create_child_and_skip_on_second_run(config,
             "choices": [{"index": 0, "finish_reason": "stop", "message": {"role": "assistant", "content": json.dumps(data, ensure_ascii=False)}}],
         })
 
-    config.zotero.save_collection = "DailyArxiv"
+    with open_dict(config.zotero):
+        config.zotero.save_collection = "DailyArxiv"
     zot = Zotero("123", "user", "fake-key")
     zot.client.close()
     zot.client = httpx.Client(transport=httpx.MockTransport(zotero_server))

@@ -29,8 +29,8 @@ def client_for(data, calls, finish="stop"):
     return SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
 
 
-def params(**analysis):
-    return {"language": "English", "generation_kwargs": {"model": "configured-model"}, "analysis": analysis}
+def params():
+    return {"language": "English", "generation_kwargs": {"model": "configured-model"}}
 
 
 @pytest.mark.parametrize("value", [
@@ -108,7 +108,9 @@ def test_invalid_analysis_is_rejected(data):
         generate_analysis(client_for(data, []), make_sample_paper(full_text="Throughput was 100 tokens/s."), params())
 
 
-def test_long_paper_reads_every_block_including_experiments_at_end():
+def test_long_paper_reads_every_block_including_experiments_at_end(monkeypatch):
+    monkeypatch.setattr("zotero_arxiv_daily.analysis.MAX_INPUT_TOKENS", 3000)
+    monkeypatch.setattr("zotero_arxiv_daily.analysis.CHUNK_TOKENS", 1000)
     paper = make_sample_paper(full_text=("Background text. " * 4000) + "FINAL EXPERIMENT")
     calls = []
     def reply(kwargs):
@@ -118,25 +120,29 @@ def test_long_paper_reads_every_block_including_experiments_at_end():
         # Evidence for the final block must still be checked against original text.
         final_block = len(calls) - 1
         return json.dumps(result(quote="FINAL EXPERIMENT", block=final_block), ensure_ascii=False)
-    note = generate_analysis(client_for(reply, calls), paper, params(max_input_tokens=3000, chunk_tokens=1000))
+    note = generate_analysis(client_for(reply, calls), paper, params())
     assert len(calls) > 2
     assert "FINAL EXPERIMENT" in calls[-2]["messages"][1]["content"]
     assert "全部提取文本已分块读取" in note
 
 
-def test_input_over_budget_fails_explicitly_instead_of_truncating():
+def test_input_over_budget_fails_explicitly_instead_of_truncating(monkeypatch):
+    monkeypatch.setattr("zotero_arxiv_daily.analysis.MAX_INPUT_TOKENS", 2000)
     paper = make_sample_paper(full_text="Throughput was 100 tokens/s.", abstract="word " * 10000)
     calls = []
     with pytest.raises(ValueError, match="exceeds budget"):
-        generate_analysis(client_for(result(), calls), paper, params(max_input_tokens=2000))
+        generate_analysis(client_for(result(), calls), paper, params())
     assert calls == []
 
 
-def test_override_model_and_output_parameter():
+def test_reuses_existing_model_and_generation_options_without_mutating_config():
     calls = []
-    config = params(generation_kwargs={"model": "analysis-model", "max_completion_tokens": 99}, max_output_tokens=4000)
-    config["generation_kwargs"].update(max_tokens=10, n=3, stream=True)
+    config = params()
+    config["generation_kwargs"].update(max_completion_tokens=99, max_tokens=10, n=3, stream=True, temperature=0.2)
     generate_analysis(client_for(result(), calls), make_sample_paper(full_text="Throughput was 100 tokens/s."), config)
-    assert calls[0]["model"] == "analysis-model"
-    assert calls[0]["max_completion_tokens"] == 4000
+    assert calls[0]["model"] == "configured-model"
+    assert calls[0]["max_completion_tokens"] == 8000
+    assert calls[0]["temperature"] == 0.2
+    assert config["generation_kwargs"]["max_completion_tokens"] == 99
+    assert config["generation_kwargs"]["max_tokens"] == 10
     assert "max_tokens" not in calls[0] and "stream" not in calls[0] and "n" not in calls[0]

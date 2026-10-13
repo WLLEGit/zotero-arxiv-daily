@@ -8,6 +8,10 @@ from urllib.parse import urlsplit
 
 import tiktoken
 
+MAX_INPUT_TOKENS = 24000
+CHUNK_TOKENS = 8000
+MAX_OUTPUT_TOKENS = 8000
+
 NOTE_TAG = "zotero-arxiv-daily:chinese-analysis:v1"
 SECTIONS = (
     "核心结论", "研究问题与背景", "核心方法与机制", "具体例子与实现细节",
@@ -112,24 +116,17 @@ def generate_analysis(client, paper, llm_params) -> str:
     """Return safe Zotero note HTML; errors leave the paper eligible for retry."""
     if not paper.full_text or not paper.full_text.strip():
         raise ValueError("Full text unavailable; do not create an abstract-only detailed note")
-    settings = llm_params.get("analysis", {})
-    input_budget = int(settings.get("max_input_tokens", 24000))
-    chunk_budget = int(settings.get("chunk_tokens", 8000))
-    output_budget = int(settings.get("max_output_tokens", 8000))
-    if input_budget < 2000 or chunk_budget < 1000 or output_budget < 1000:
-        raise ValueError("Analysis token budgets are too small")
     enc = tiktoken.get_encoding("o200k_base")
-    blocks = _source_blocks(paper.full_text, enc, min(chunk_budget, input_budget - 1000))
+    blocks = _source_blocks(paper.full_text, enc, min(CHUNK_TOKENS, MAX_INPUT_TOKENS - 1000))
     sources = "\n\n".join(f"[S{i}]\n{b}" for i, b in enumerate(blocks, 1))
     kwargs = dict(llm_params.get("generation_kwargs", {}))
-    kwargs.update(dict(settings.get("generation_kwargs", {})))
     # Requests always return one complete JSON object, not a stream or n samples.
     kwargs.pop("stream", None)
     kwargs.pop("n", None)
     kwargs.pop("response_format", None)
     output_parameter = "max_completion_tokens" if "max_completion_tokens" in kwargs else "max_tokens"
     kwargs.pop("max_tokens" if output_parameter == "max_completion_tokens" else "max_completion_tokens", None)
-    kwargs[output_parameter] = output_budget
+    kwargs[output_parameter] = MAX_OUTPUT_TOKENS
     if "model" not in kwargs:
         raise ValueError("No model configured for detailed analysis")
 
@@ -142,7 +139,7 @@ def generate_analysis(client, paper, llm_params) -> str:
         "返回一个 JSON 对象，不要 HTML、Markdown 代码围栏或额外文字。"
     )
     coverage = "全部提取文本（不保证图像、公式或源文件提取完整）"
-    if len(enc.encode(sources, disallowed_special=())) > input_budget - 1000:
+    if len(enc.encode(sources, disallowed_special=())) > MAX_INPUT_TOKENS - 1000:
         facts = []
         for i, block in enumerate(blocks, 1):
             chunk_kwargs = {**kwargs, output_parameter: 1500}
@@ -172,8 +169,8 @@ def generate_analysis(client, paper, llm_params) -> str:
         "研究评价明确标为推断；没有文献检索就不下新颖性定论。至少提供一条证据。\n\n"
         + sources
     )
-    if len(enc.encode(instruction + request, disallowed_special=())) > input_budget:
-        raise ValueError("Analysis input exceeds budget; increase max_input_tokens rather than truncate")
+    if len(enc.encode(instruction + request, disallowed_special=())) > MAX_INPUT_TOKENS:
+        raise ValueError("Analysis input exceeds budget; refusing to truncate")
     result = _complete_json(client, [
         {"role": "system", "content": instruction},
         {"role": "user", "content": request},
