@@ -162,6 +162,7 @@ class Executor:
         note = dict(zot.item_template('note'))
         note.update({
             'key': stable_item_key(f'{self.config.zotero.user_id}:{parent_key}:{NOTE_TAG}'),
+            'version': 0,
             'parentItem': parent_key,
             'note': note_html,
             'tags': [{'tag': NOTE_TAG}],
@@ -225,6 +226,7 @@ class Executor:
                     parent = next((existing[i] for i in identifiers if i in existing), None)
                     if parent is None:
                         item['key'] = stable_item_key(f'{self.config.zotero.user_id}:{p.source}:{identifiers[0]}')
+                        item['version'] = 0
                         parent_key = self._created_key(zot.create_items([item]))
                         parent = zot.item(parent_key)
                         for identifier in identifiers:

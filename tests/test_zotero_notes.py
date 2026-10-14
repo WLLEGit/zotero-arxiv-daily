@@ -47,6 +47,9 @@ class Library:
     def create_items(self, items):
         successful, unchanged, failed = {}, {}, {}
         for n, item in enumerate(items):
+            if 'key' in item and 'version' not in item:
+                failed[str(n)] = {"code": 428, "message": "Version required for key-based writes"}
+                continue
             if item["itemType"] == "note" and self.fail_note:
                 failed[str(n)] = {"code": 403, "message": "Write denied"}
                 continue
@@ -265,6 +268,11 @@ def test_real_clients_with_mock_http_create_child_and_skip_on_second_run(config,
         assert request.headers.get("Zotero-Write-Token")
         successful = {}
         for n, data in enumerate(json.loads(request.content)):
+            if 'key' in data and 'version' not in data:
+                return httpx.Response(200, json={"successful": {}, "unchanged": {}, "failed": {
+                    str(n): {"code": 428, "message": "Version required for key-based writes"},
+                }})
+            assert data['version'] == 0, "New objects must declare version zero"
             assert data["key"] not in stored, "Duplicate HTTP write"
             key = data["key"]
             item = {"key": key, "version": 1, "data": data}
@@ -302,6 +310,7 @@ def test_real_clients_with_mock_http_create_child_and_skip_on_second_run(config,
         llm.close()
         zot.client.close()
     assert len(writes) == 2 and len(llm_calls) == 1
+    assert all(data['version'] == 0 for data in writes)
     assert writes[1]["itemType"] == "note"
     assert writes[1]["parentItem"] == writes[0]["key"]
     assert "中文详细解读" in writes[1]["note"]
