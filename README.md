@@ -214,3 +214,40 @@ If you find this project helpful, welcome to sponsor me via WeChat or via [ko-fi
 ## 🌟 Star History
 
 [![Star History Chart](https://api.star-history.com/svg?repos=TideDra/zotero-arxiv-daily&type=Date)](https://star-history.com/#TideDra/zotero-arxiv-daily&Date)
+
+
+### Illustrated Chinese reports in Zotero (fork)
+
+Set the existing `zotero.save_collection` to your destination collection. The
+existing `zotero.save_top_k` (default 10) selects the papers to sync and explain.
+The email is sent first and retains its existing format. Each selected paper then
+receives an offline HTML child attachment with embedded original figures, stored
+in WebDAV. Existing parents are reused and completed reports are skipped; old
+notes and personal metadata are preserved. Only papers selected in the current
+run are backfilled, not all historical collection contents.
+
+Reports reuse `llm.api.key`, `llm.api.base_url`, `llm.generation_kwargs.model`, and
+`llm.api_mode`. There is no separate report model, token budget or retry setting.
+OpenCode uses its defaults and the prompt in
+[`report_prompt.txt`](src/zotero_arxiv_daily/report_prompt.txt). Generation ends
+with the HTML file; layout/visual self-checks are not requested.
+
+Add only these GitHub Actions secrets:
+
+| Secret | Meaning |
+| --- | --- |
+| `WEBDAV_URL` | WebDAV root URL, with or without the trailing `/zotero` directory |
+| `WEBDAV_USERNAME` | WebDAV username |
+| `WEBDAV_PASSWORD` | WebDAV password / app password |
+
+They populate `webdav.url`, `webdav.username` and `webdav.password`; credentials
+stay outside the paper agent's environment. The Zotero API key also needs library
+write access. Without complete WebDAV settings, parent sync still runs and report
+generation is skipped. Failed uploads/generation are isolated per paper and can
+be retried when that paper is selected again. File bytes are uploaded before the
+Zotero attachment is created, using a stable attachment key to avoid duplicates.
+
+Both daily and manual test workflows install OpenCode 1.19.3 and an SVG rendering
+tool. Local runs need `opencode` on `PATH`; no desktop browser or absolute machine
+paths are used. Reports and agent logs are retained as Actions artifacts for
+three days. The daily schedule is 21:43 UTC (05:43 Asia/Shanghai the next day).

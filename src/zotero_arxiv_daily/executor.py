@@ -6,11 +6,16 @@ from .retriever import get_retriever_cls
 from .protocol import CorpusPaper
 import random
 from datetime import datetime
+from pathlib import Path
 from .reranker import get_reranker_cls
 from .construct_email import render_email
 from .utils import send_email
 from openai import OpenAI
 from tqdm import tqdm
+from .reports import (
+    canonical_identifier, generate_report, has_report,
+    item_identifiers, stable_item_key, upload_report,
+)
 
 
 def normalize_path_patterns(patterns: list[str] | ListConfig | None, config_key: str) -> list[str] | None:
@@ -89,7 +94,153 @@ class Executor:
             logger.info(f"Selected {len(corpus)} zotero papers:\n{samples}\n...")
         return corpus
 
-    
+    @staticmethod
+    def _ensure_collection(zot, path: str) -> str:
+        """Resolve a collection by its '/'-separated path, creating missing levels. Returns the collection key."""
+        names = [p for p in path.split('/') if p]
+        if not names:
+            raise ValueError(f"Invalid zotero.save_collection: {path!r}")
+        collections = zot.everything(zot.collections())
+        by_key = {c['key']: c for c in collections}
+
+        def full_path(c: dict) -> str:
+            parent = c['data']['parentCollection']
+            if parent and parent in by_key:
+                return full_path(by_key[parent]) + '/' + c['data']['name']
+            return c['data']['name']
+
+        existing = {full_path(c): c['key'] for c in collections}
+        parent_key = None
+        cur = ''
+        for name in names:
+            cur = f"{cur}/{name}" if cur else name
+            if cur in existing:
+                parent_key = existing[cur]
+                continue
+            payload = {'name': name}
+            if parent_key:
+                payload['parentCollection'] = parent_key
+            resp = zot.create_collections([payload])
+            key = resp['successful']['0']['key']
+            logger.info(f"Created Zotero collection '{cur}' ({key})")
+            existing[cur] = key
+            parent_key = key
+        return parent_key
+
+    @staticmethod
+    def _existing_papers(zot, collection_key: str) -> dict[str, dict]:
+        """Prefer target-collection items; reuse papers elsewhere in the library."""
+        items = zot.everything(zot.collection_items_top(collection_key))
+        items += zot.everything(zot.items(itemType='conferencePaper || journalArticle || preprint'))
+        existing = {}
+        for item in items:
+            if item.get('data', {}).get('deleted') or not item.get('key'):
+                continue
+            for identifier in item_identifiers(item):
+                existing.setdefault(identifier, item)
+        return existing
+
+    @staticmethod
+    def _created_key(response: dict) -> str:
+        successful = response.get('successful', {}).get('0')
+        if successful:
+            return successful['key']
+        # Zotero returns keys (not full items) for unchanged writes.
+        key = response.get('unchanged', {}).get('0') or response.get('success', {}).get('0')
+        if key:
+            return key
+        raise RuntimeError(f"Zotero item creation failed: {response.get('failed', {})}")
+
+    def _save_report(self, zot, paper, parent_key: str) -> None:
+        webdav = self.config.get("webdav", {})
+        if not all(webdav.get(field) for field in ("url", "username", "password")):
+            logger.warning("WebDAV is not configured; skipping illustrated report")
+            return
+        if has_report(zot.everything(zot.children(parent_key))):
+            logger.info(f"Illustrated report already exists for {paper.url}; skipping")
+            return
+        report = generate_report(paper, self.config.llm, Path("outputs/reports") / parent_key)
+        if has_report(zot.everything(zot.children(parent_key))):
+            return
+        key = upload_report(zot, parent_key, report, webdav, str(self.config.zotero.user_id))
+        logger.info(f"Saved illustrated report attachment {key} for {paper.url}")
+
+    @staticmethod
+    def _split_creator(name: str) -> dict:
+        parts = name.strip().split()
+        if len(parts) >= 2:
+            return {'creatorType': 'author', 'firstName': ' '.join(parts[:-1]), 'lastName': parts[-1]}
+        return {'creatorType': 'author', 'name': name}
+
+    def _paper_to_item(self, paper, template: dict, collection_key: str) -> tuple[dict, list[str]]:
+        item = dict(template)
+        item['title'] = paper.title
+        item['abstractNote'] = paper.abstract or ''
+        item['url'] = paper.url or ''
+        item['creators'] = [self._split_creator(a) for a in (paper.authors or [])]
+        item['collections'] = [collection_key]
+        identifiers = [paper.url] if paper.url else []
+        if paper.source == 'arxiv' and paper.url:
+            arxiv_id = paper.url.rsplit('/abs/', 1)[-1].rsplit('/', 1)[-1]
+            item['repository'] = 'arXiv'
+            item['archiveID'] = f'arXiv:{arxiv_id}'
+            identifiers.append(item['archiveID'])
+        else:
+            item['repository'] = paper.source
+        extra = []
+        if paper.tldr:
+            extra.append(f'TLDR: {paper.tldr}')
+        if paper.score is not None:
+            extra.append(f'Relevance score: {paper.score:.4f}')
+        if paper.affiliations:
+            extra.append('Affiliations: ' + ', '.join(paper.affiliations))
+        if extra:
+            item['extra'] = '\n'.join(extra)
+        return item, identifiers
+
+    def save_to_zotero(self, papers: list) -> None:
+        save_collection = self.config.zotero.get("save_collection", None)
+        if not save_collection or not papers:
+            return
+        top_k = self.config.zotero.get("save_top_k", 10)
+        if type(top_k) is not int or top_k < 0:
+            logger.error("zotero.save_top_k must be a non-negative integer")
+            return
+        papers = papers[:top_k]  # papers arrive sorted by relevance, descending
+        if not papers:
+            return
+        try:
+            zot = zotero.Zotero(self.config.zotero.user_id, 'user', self.config.zotero.api_key)
+            collection_key = self._ensure_collection(zot, save_collection)
+            existing = self._existing_papers(zot, collection_key)
+            template = zot.item_template('preprint')
+            for p in papers:
+                try:
+                    item, identifiers = self._paper_to_item(p, template, collection_key)
+                    identifiers = [canonical_identifier(i) for i in identifiers]
+                    parent = next((existing[i] for i in identifiers if i in existing), None)
+                    if parent is None:
+                        item['key'] = stable_item_key(f'{self.config.zotero.user_id}:{p.source}:{identifiers[0]}')
+                        item['version'] = 0
+                        parent_key = self._created_key(zot.create_items([item]))
+                        parent = zot.item(parent_key)
+                        for identifier in identifiers:
+                            existing[identifier] = parent
+                    else:
+                        parent_key = parent['key']
+                        if collection_key not in parent['data'].get('collections', []):
+                            response = zot.addto_collection(collection_key, parent)
+                            response.raise_for_status()
+                            parent = zot.item(parent_key)
+                            for identifier in identifiers:
+                                existing[identifier] = parent
+                    self._save_report(zot, p, parent_key)
+                except Exception as e:
+                    # A failed report leaves the parent eligible for a later retry.
+                    logger.warning(f"Failed to sync paper/report for {p.url}: {e}")
+        except Exception as e:
+            logger.error(f"Failed to save papers to Zotero: {e}")
+
     def run(self):
         corpus = self.fetch_zotero_corpus()
         corpus = self.filter_corpus(corpus)
@@ -122,3 +273,4 @@ class Executor:
         email_content = render_email(reranked_papers)
         send_email(self.config, email_content)
         logger.info("Email sent successfully")
+        self.save_to_zotero(reranked_papers)

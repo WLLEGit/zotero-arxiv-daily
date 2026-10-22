@@ -2,7 +2,11 @@ name: Send emails daily
 on:
   workflow_dispatch:
   schedule:
-    - cron: '0 22 * * *'
+    - cron: '43 21 * * *'
+
+concurrency:
+  group: daily-arxiv-delivery
+  cancel-in-progress: false
 
 jobs:
   calculate-and-send:
@@ -17,6 +21,12 @@ jobs:
       - name: Setup uv
         uses: astral-sh/setup-uv@v7
 
+      - name: Install report tools
+        run: |
+          npm install --global opencode-ai@1.19.3
+          sudo apt-get update
+          sudo apt-get install --yes librsvg2-bin
+
       - name: Run script
         env:
           ZOTERO_ID: ${{ secrets.ZOTERO_ID }}
@@ -26,9 +36,19 @@ jobs:
           SENDER_PASSWORD: ${{ secrets.SENDER_PASSWORD }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           OPENAI_API_BASE: ${{ secrets.OPENAI_API_BASE }}
+          WEBDAV_URL: ${{ secrets.WEBDAV_URL }}
+          WEBDAV_USERNAME: ${{ secrets.WEBDAV_USERNAME }}
+          WEBDAV_PASSWORD: ${{ secrets.WEBDAV_PASSWORD }}
           CUSTOM_CONFIG: ${{ vars.CUSTOM_CONFIG }}
         run: |
           printf "%b\n" "$CUSTOM_CONFIG" > config/custom.yaml
-          echo "Use custom config: "
-          cat config/custom.yaml
           uv run src/zotero_arxiv_daily/main.py
+
+      - name: Save generated reports and agent logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: paper-reports
+          path: outputs/reports/
+          retention-days: 3
+          if-no-files-found: ignore
