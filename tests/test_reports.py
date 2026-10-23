@@ -6,11 +6,12 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 import zipfile
+import threading
 
 import pytest
 
 from tests.canned_responses import make_sample_paper
-from zotero_arxiv_daily import reports
+from zotero_arxiv_daily import executor as executor_module, reports
 from zotero_arxiv_daily.construct_email import render_email
 from zotero_arxiv_daily.executor import Executor
 
@@ -88,7 +89,8 @@ def sync(config, monkeypatch, tmp_path):
     monkeypatch.setattr(reports.requests, "Session", lambda: dav)
     def generate(paper, llm, output_dir):
         generated.append(paper.url)
-        path = tmp_path / "report.html"
+        path = tmp_path / output_dir.name / "report.html"
+        path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("<html><body>中文图文解读</body></html>")
         return path
     monkeypatch.setattr("zotero_arxiv_daily.executor.generate_report", generate)
@@ -202,3 +204,87 @@ def test_agent_reuses_model_and_does_not_receive_other_credentials(config, monke
     monkeypatch.setattr(reports.subprocess, "run", run)
     report = reports.generate_report(papers(1)[0], config.llm, tmp_path)
     assert report.read_text() == "<html>中文解读</html>"
+
+
+def test_five_generators_overlap_and_writes_stay_on_caller(sync, monkeypatch, tmp_path):
+    executor, library, dav, generated = sync
+    caller = threading.get_ident()
+    barrier = threading.Barrier(5, timeout=10)
+    lock = threading.Lock()
+    active = peak = 0
+    original_create, original_put = library.create_items, dav.put
+    original_children = library.children
+
+    def create(items):
+        assert threading.get_ident() == caller
+        return original_create(items)
+
+    def children(key):
+        assert threading.get_ident() == caller
+        return original_children(key)
+
+    def put(*args, **kwargs):
+        assert threading.get_ident() == caller
+        return original_put(*args, **kwargs)
+
+    def generate(paper, llm, output_dir):
+        nonlocal active, peak
+        assert threading.get_ident() != caller
+        with lock:
+            active += 1
+            peak = max(peak, active)
+        barrier.wait()
+        path = tmp_path / output_dir.name
+        path.write_text("中文解读")
+        # Hold each wave together so peak measures concurrent generations.
+        barrier.wait()
+        with lock:
+            active -= 1
+        return path
+
+    monkeypatch.setattr(library, "create_items", create)
+    monkeypatch.setattr(library, "children", children)
+    monkeypatch.setattr(dav, "put", put)
+    monkeypatch.setattr("zotero_arxiv_daily.executor.generate_report", generate)
+    executor.save_to_zotero(papers(10))
+    assert peak == 5
+    assert len(attachments(library)) == 10
+
+
+def test_generation_failure_does_not_stop_other_reports(sync, monkeypatch):
+    executor, library, dav, generated = sync
+    original = executor_module.generate_report
+
+    def generate(paper, *args):
+        if paper.url == papers(1)[0].url:
+            raise RuntimeError("Model unavailable")
+        return original(paper, *args)
+
+    monkeypatch.setattr("zotero_arxiv_daily.executor.generate_report", generate)
+    executor.save_to_zotero(papers(10))
+    assert len(attachments(library)) == 9
+    assert len(library.items()) == 10
+
+
+def test_pending_arxiv_versions_generate_only_once(sync):
+    executor, library, dav, generated = sync
+    candidate = papers(1)[0]
+    revision = copy.deepcopy(candidate)
+    revision.url = candidate.url.replace("v1", "v2")
+    executor.save_to_zotero([candidate, revision])
+    assert len(generated) == len(attachments(library)) == 1
+
+
+def test_attachment_write_survives_unavailable_template_endpoint(sync, monkeypatch):
+    executor, library, dav, generated = sync
+    original = library.item_template
+
+    def template(item_type, *args):
+        if item_type == "attachment":
+            raise RuntimeError("Expired template cache: missing itemType query parameter")
+        return original(item_type, *args)
+
+    monkeypatch.setattr(library, "item_template", template)
+    executor.save_to_zotero(papers(2))
+    assert len(attachments(library)) == 2
+    assert all(item["data"]["linkMode"] == "imported_file" for item in attachments(library))

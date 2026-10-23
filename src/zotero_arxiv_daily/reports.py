@@ -113,13 +113,13 @@ def upload_report(zot, parent_key: str, report: Path, webdav, user_id: str) -> s
         for suffix, data in (("zip", archive.getvalue()), ("prop", prop.encode())):
             response = session.put(f"{base}/{key}.{suffix}", data=data, timeout=120)
             response.raise_for_status()
-    attachment = dict(zot.item_template("attachment", "imported_file"))
-    attachment.update({
+    attachment = {
+        "itemType": "attachment", "linkMode": "imported_file",
         "key": key, "version": 0, "parentItem": parent_key,
         "title": "中文图文解读", "filename": REPORT_FILENAME,
         "contentType": "text/html", "md5": md5, "mtime": mtime,
         "tags": [{"tag": REPORT_TAG}],
-    })
+    }
     response = zot.create_items([attachment])
     if not any(response.get(field, {}).get("0") for field in ("successful", "unchanged", "success")):
         raise RuntimeError(f"Zotero report attachment creation failed: {response.get('failed', {})}")

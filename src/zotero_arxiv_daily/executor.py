@@ -7,6 +7,7 @@ from .protocol import CorpusPaper
 import random
 from datetime import datetime
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from .reranker import get_reranker_cls
 from .construct_email import render_email
 from .utils import send_email
@@ -151,20 +152,6 @@ class Executor:
             return key
         raise RuntimeError(f"Zotero item creation failed: {response.get('failed', {})}")
 
-    def _save_report(self, zot, paper, parent_key: str) -> None:
-        webdav = self.config.get("webdav", {})
-        if not all(webdav.get(field) for field in ("url", "username", "password")):
-            logger.warning("WebDAV is not configured; skipping illustrated report")
-            return
-        if has_report(zot.everything(zot.children(parent_key))):
-            logger.info(f"Illustrated report already exists for {paper.url}; skipping")
-            return
-        report = generate_report(paper, self.config.llm, Path("outputs/reports") / parent_key)
-        if has_report(zot.everything(zot.children(parent_key))):
-            return
-        key = upload_report(zot, parent_key, report, webdav, str(self.config.zotero.user_id))
-        logger.info(f"Saved illustrated report attachment {key} for {paper.url}")
-
     @staticmethod
     def _split_creator(name: str) -> dict:
         parts = name.strip().split()
@@ -214,30 +201,54 @@ class Executor:
             collection_key = self._ensure_collection(zot, save_collection)
             existing = self._existing_papers(zot, collection_key)
             template = zot.item_template('preprint')
-            for p in papers:
-                try:
-                    item, identifiers = self._paper_to_item(p, template, collection_key)
-                    identifiers = [canonical_identifier(i) for i in identifiers]
-                    parent = next((existing[i] for i in identifiers if i in existing), None)
-                    if parent is None:
-                        item['key'] = stable_item_key(f'{self.config.zotero.user_id}:{p.source}:{identifiers[0]}')
-                        item['version'] = 0
-                        parent_key = self._created_key(zot.create_items([item]))
-                        parent = zot.item(parent_key)
-                        for identifier in identifiers:
-                            existing[identifier] = parent
-                    else:
-                        parent_key = parent['key']
-                        if collection_key not in parent['data'].get('collections', []):
-                            response = zot.addto_collection(collection_key, parent)
-                            response.raise_for_status()
+            webdav = self.config.get("webdav", {})
+            reports_enabled = all(webdav.get(field) for field in ("url", "username", "password"))
+            if not reports_enabled:
+                logger.warning("WebDAV is not configured; skipping illustrated reports")
+            # Only generation runs in workers; the Zotero client stays on this thread.
+            with ThreadPoolExecutor(max_workers=5) as pool:
+                pending, queued = {}, set()
+                for p in papers:
+                    try:
+                        item, identifiers = self._paper_to_item(p, template, collection_key)
+                        identifiers = [canonical_identifier(i) for i in identifiers]
+                        parent = next((existing[i] for i in identifiers if i in existing), None)
+                        if parent is None:
+                            item['key'] = stable_item_key(f'{self.config.zotero.user_id}:{p.source}:{identifiers[0]}')
+                            item['version'] = 0
+                            parent_key = self._created_key(zot.create_items([item]))
                             parent = zot.item(parent_key)
                             for identifier in identifiers:
                                 existing[identifier] = parent
-                    self._save_report(zot, p, parent_key)
-                except Exception as e:
-                    # A failed report leaves the parent eligible for a later retry.
-                    logger.warning(f"Failed to sync paper/report for {p.url}: {e}")
+                        else:
+                            parent_key = parent['key']
+                            if collection_key not in parent['data'].get('collections', []):
+                                response = zot.addto_collection(collection_key, parent)
+                                response.raise_for_status()
+                                parent = zot.item(parent_key)
+                                for identifier in identifiers:
+                                    existing[identifier] = parent
+                        if not reports_enabled or parent_key in queued:
+                            continue
+                        if has_report(zot.everything(zot.children(parent_key))):
+                            logger.info(f"Illustrated report already exists for {p.url}; skipping")
+                            continue
+                        future = pool.submit(generate_report, p, self.config.llm, Path("outputs/reports") / parent_key)
+                        pending[future] = (p, parent_key)
+                        queued.add(parent_key)
+                    except Exception as e:
+                        # A failed report leaves the parent eligible for a later retry.
+                        logger.warning(f"Failed to sync paper/report for {p.url}: {e}")
+                for future in as_completed(pending):
+                    p, parent_key = pending[future]
+                    try:
+                        report = future.result()
+                        if has_report(zot.everything(zot.children(parent_key))):
+                            continue
+                        key = upload_report(zot, parent_key, report, webdav, str(self.config.zotero.user_id))
+                        logger.info(f"Saved illustrated report attachment {key} for {p.url}")
+                    except Exception as e:
+                        logger.warning(f"Failed to sync paper/report for {p.url}: {e}")
         except Exception as e:
             logger.error(f"Failed to save papers to Zotero: {e}")
 
