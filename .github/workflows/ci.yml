@@ -22,3 +22,29 @@ jobs:
       - name: Run Pytest
         run: |
           uv run pytest -m "" --cov=src/zotero_arxiv_daily --cov-report=term-missing
+
+      - name: Export current public metadata without summaries or Zotero writes
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          CUSTOM_CONFIG: ${{ vars.CUSTOM_CONFIG }}
+        run: |
+          uv run python - <<'PYTHON'
+          import os, yaml
+          from omegaconf import OmegaConf
+          from zotero_arxiv_daily.executor import Executor
+          from zotero_arxiv_daily.protocol import Paper
+          from zotero_arxiv_daily.retriever.arxiv_retriever import ArxivRetriever
+          source = yaml.safe_load(os.environ['CUSTOM_CONFIG'])['source']
+          config = OmegaConf.create({'source': source, 'executor': {'debug': False}})
+          raw = ArxivRetriever(config)._retrieve_raw_papers()
+          papers = [Paper(source='arxiv', title=p.title, authors=[a.name for a in p.authors], abstract=p.summary, url=p.entry_id, pdf_url=p.pdf_url) for p in raw]
+          Executor.export_paper_index(papers, ['arxiv'])
+          PYTHON
+      - name: Upload verified public index
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@v4
+        with:
+          name: paper-index
+          path: outputs/paper-index.json
+          retention-days: 60
+          if-no-files-found: error

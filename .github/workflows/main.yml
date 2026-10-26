@@ -44,6 +44,15 @@ jobs:
           printf "%b\n" "$CUSTOM_CONFIG" > config/custom.yaml
           uv run src/zotero_arxiv_daily/main.py
 
+      - name: Save public paper index
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: paper-index
+          path: outputs/paper-index.json
+          retention-days: 60
+          if-no-files-found: ignore
+
       - name: Save generated reports and agent logs
         if: always()
         uses: actions/upload-artifact@v4

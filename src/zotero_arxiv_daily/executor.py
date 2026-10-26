@@ -5,7 +5,8 @@ from .utils import glob_match
 from .retriever import get_retriever_cls
 from .protocol import CorpusPaper
 import random
-from datetime import datetime
+from datetime import datetime, timezone
+import json
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from .reranker import get_reranker_cls
@@ -253,6 +254,30 @@ class Executor:
         except Exception as e:
             logger.error(f"Failed to save papers to Zotero: {e}")
 
+    @staticmethod
+    def export_paper_index(papers: list, sources: list[str]) -> None:
+        """Export public candidates without Zotero data, scores or extra model calls."""
+        try:
+            output = Path("outputs/paper-index.json")
+            output.parent.mkdir(parents=True, exist_ok=True)
+            payload = {
+                "schema_version": 1,
+                "observed_at": datetime.now(timezone.utc).isoformat(),
+                "sources": sources,
+                "status": "complete",
+                "papers": [
+                    {field: getattr(paper, field, None) for field in
+                     ("source", "title", "authors", "abstract", "url", "pdf_url")}
+                    for paper in papers
+                ],
+            }
+            temporary = output.with_suffix(".tmp")
+            temporary.write_text(json.dumps(payload, ensure_ascii=False) + "\n", encoding="utf-8")
+            temporary.replace(output)
+            logger.info(f"Exported {len(papers)} public paper candidates")
+        except Exception as exc:
+            logger.warning(f"Paper index export failed: {type(exc).__name__}")
+
     def run(self):
         corpus = self.fetch_zotero_corpus()
         corpus = self.filter_corpus(corpus)
@@ -269,6 +294,7 @@ class Executor:
             logger.info(f"Retrieved {len(papers)} {source} papers")
             all_papers.extend(papers)
         logger.info(f"Total {len(all_papers)} papers retrieved from all sources")
+        self.export_paper_index(all_papers, list(self.retrievers))
         reranked_papers = []
         if len(all_papers) > 0:
             logger.info("Reranking papers...")

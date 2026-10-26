@@ -281,3 +281,26 @@ def test_run_no_papers_send_empty_true(config, monkeypatch):
     assert len(sent) == 1, "Email should be sent even with no papers when send_empty=true"
     _, _, body = sent[0]
     assert "text/html" in body
+
+
+def test_export_all_public_candidates_without_private_fields(tmp_path, monkeypatch):
+    import json
+    from types import SimpleNamespace
+    monkeypatch.chdir(tmp_path)
+    papers = [SimpleNamespace(source="arxiv", title=f"Paper {i}", authors=["Author"],
+              abstract="Abstract", url=f"https://arxiv.org/abs/2610.{i:05d}", pdf_url=None,
+              score=0.7, full_text="not exported", paths=["private collection"])
+              for i in range(110)]
+    Executor.export_paper_index(papers, ["arxiv"])
+    data = json.loads((tmp_path / "outputs/paper-index.json").read_text())
+    assert data["status"] == "complete"
+    assert len(data["papers"]) == 110
+    assert set(data["papers"][0]) == {"source", "title", "authors", "abstract", "url", "pdf_url"}
+    Executor.export_paper_index([], ["arxiv"])
+    assert json.loads((tmp_path / "outputs/paper-index.json").read_text())["papers"] == []
+
+
+def test_index_export_failure_is_nonfatal(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "outputs").write_text("blocks directory creation")
+    Executor.export_paper_index([], ["arxiv"])

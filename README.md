@@ -256,3 +256,18 @@ Both daily and manual test workflows install OpenCode 1.19.3 and an SVG renderin
 tool. Local runs need `opencode` on `PATH`; no desktop browser or absolute machine
 paths are used. Reports and agent logs are retained as Actions artifacts for
 three days. The daily schedule is 21:43 UTC (05:43 Asia/Shanghai the next day).
+
+### Public paper index for Research Radar
+
+The daily workflow exports all retrieved public candidates (before ranking and top-k
+selection) as the `paper-index` Actions artifact, retained for 60 days. It contains
+only titles, authors, abstracts and public URLs, plus collection time and source
+names. Collection time is not publication time. Empty successful retrievals have
+an explicit complete/empty index; retrieval failures do not create a success index.
+No Zotero collections, personal scores, full text, credentials or extra LLM calls
+are included. Export errors do not interrupt email or Zotero processing. Research
+Radar consumes the artifact independently; the daily pipeline does not call Radar.
+
+For a metadata-only live check, manually dispatch CI: after its tests, it reads
+the configured public arXiv RSS and uploads the same index, without full-text
+extraction, model calls, email or Zotero writes.
