@@ -9,6 +9,7 @@ from datetime import datetime
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from .reranker import get_reranker_cls
+from .reranker.llm import rerank_with_llm
 from .construct_email import render_email
 from .utils import send_email
 from openai import OpenAI
@@ -273,6 +274,10 @@ class Executor:
             logger.info("Reranking papers...")
             reranked_papers = self.reranker.rerank(all_papers, corpus)
             reranked_papers = reranked_papers[:self.config.executor.max_paper_num]
+            reranked_papers = rerank_with_llm(
+                reranked_papers, self.openai_client, self.config.llm,
+                self.config.reranker.get("prompt"),
+            )
             logger.info("Generating TLDR and affiliations...")
             for p in tqdm(reranked_papers):
                 p.generate_tldr(self.openai_client, self.config.llm)

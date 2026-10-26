@@ -42,6 +42,7 @@ def _base_config():
                 "source.arxiv.category=[cs.AI,cs.CV]",
                 "executor.source=[arxiv]",
                 "executor.reranker=api",
+                "reranker.prompt=null",
                 "executor.debug=false",
                 "executor.send_empty=false",
             ],
