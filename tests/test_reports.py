@@ -7,6 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 import zipfile
 import threading
+import subprocess
 
 import pytest
 
@@ -288,3 +289,73 @@ def test_attachment_write_survives_unavailable_template_endpoint(sync, monkeypat
     executor.save_to_zotero(papers(2))
     assert len(attachments(library)) == 2
     assert all(item["data"]["linkMode"] == "imported_file" for item in attachments(library))
+
+
+@pytest.mark.parametrize("retry_after,expected", [(None, 120), ("300", 300), ("bad", 120),
+    ("Thu, 01 Jan 1970 00:05:00 GMT", 300)])
+def test_rate_limit_waits_and_resumes_same_session(config, monkeypatch, tmp_path, retry_after, expected):
+    calls, waits = [], []
+    monkeypatch.setattr(reports.time, "sleep", waits.append)
+    monkeypatch.setattr(reports.time, "time", lambda: 0)
+    monkeypatch.setattr(reports.random, "uniform", lambda *args: 0)
+
+    def run(command, **kwargs):
+        calls.append((command, kwargs["cwd"], kwargs["env"]))
+        if len(calls) == 1:
+            Path(kwargs["cwd"], "paper.txt").write_text("Already read")
+            event = {"type": "error", "sessionID": "ses_existing", "error": {"data": {
+                "statusCode": 429, "responseHeaders": {"retry-after": retry_after}}}}
+            kwargs["stdout"].write("plain diagnostic\n" + json.dumps(event) + "\n")
+            raise subprocess.CalledProcessError(1, command)
+        assert command[-3:-1] == ["--session", "ses_existing"]
+        assert calls[0][1:] == calls[1][1:]
+        assert Path(kwargs["cwd"], "paper.txt").read_text() == "Already read"
+        Path(kwargs["cwd"], "report.html").write_text("Recovered report")
+        kwargs["stdout"].write(json.dumps({"type": "text", "sessionID": "ses_existing"}) + "\n")
+
+    monkeypatch.setattr(reports.subprocess, "run", run)
+    assert reports.generate_report(papers(1)[0], config.llm, tmp_path).read_text() == "Recovered report"
+    assert waits == [expected]
+    assert '"statusCode": 429' in (tmp_path / "agent.jsonl").read_text()
+    assert '"type": "text"' in (tmp_path / "agent.jsonl").read_text()
+
+
+@pytest.mark.parametrize("status,session,attempts", [(429, "ses_existing", 4),
+    (401, "ses_existing", 1), (500, "ses_existing", 1), (429, None, 1)])
+def test_report_retry_is_bounded_and_only_for_resumable_429(config, monkeypatch, tmp_path, status, session, attempts):
+    calls, waits = [], []
+    monkeypatch.setattr(reports.time, "sleep", waits.append)
+    monkeypatch.setattr(reports.random, "uniform", lambda *args: 0)
+
+    def run(command, **kwargs):
+        calls.append(command)
+        kwargs["stdout"].write(json.dumps({"type": "error", "sessionID": session,
+            "error": {"data": {"statusCode": status}}}) + "\n")
+        raise subprocess.CalledProcessError(1, command)
+
+    monkeypatch.setattr(reports.subprocess, "run", run)
+    with pytest.raises(subprocess.CalledProcessError):
+        reports.generate_report(papers(1)[0], config.llm, tmp_path)
+    assert len(calls) == attempts
+    assert waits == [120, 240, 480][:attempts - 1]
+    assert not (tmp_path / reports.REPORT_FILENAME).exists()
+
+
+def test_prior_429_does_not_retry_a_later_permanent_error(config, monkeypatch, tmp_path):
+    calls, waits = [], []
+    monkeypatch.setattr(reports.time, "sleep", waits.append)
+    monkeypatch.setattr(reports.random, "uniform", lambda *args: 0)
+
+    def run(command, **kwargs):
+        calls.append(command)
+        if len(calls) == 1:
+            kwargs["stdout"].write(json.dumps({"type": "error", "sessionID": "ses_existing",
+                "error": {"data": {"statusCode": 429}}}) + "\n")
+        else:
+            kwargs["stdout"].write("Unstructured permanent failure\n")
+        raise subprocess.CalledProcessError(1, command)
+
+    monkeypatch.setattr(reports.subprocess, "run", run)
+    with pytest.raises(subprocess.CalledProcessError):
+        reports.generate_report(papers(1)[0], config.llm, tmp_path)
+    assert len(calls) == 2 and waits == [120]

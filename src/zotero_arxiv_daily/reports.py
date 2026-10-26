@@ -4,6 +4,9 @@ import hashlib
 import io
 import json
 import os
+import random
+import time
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 import re
 import shutil
@@ -12,6 +15,7 @@ from tempfile import TemporaryDirectory
 import zipfile
 
 import requests
+from loguru import logger
 
 REPORT_TAG = "zotero-arxiv-daily:illustrated-report:v1"
 REPORT_FILENAME = "daily-arxiv-report.html"
@@ -47,8 +51,54 @@ def has_report(children: list[dict]) -> bool:
     )
 
 
+def _run_agent(command: list[str], work: str, env: dict, log_path: Path) -> None:
+    """After native retries are exhausted, resume rate-limited sessions in place."""
+    base_command = command[:-1]
+    with log_path.open("w+", encoding="utf-8") as log:
+        for attempt in range(4):
+            start = log.tell()
+            try:
+                subprocess.run(command, cwd=work, env=env, stdout=log,
+                               stderr=subprocess.STDOUT, check=True)
+                return
+            except subprocess.CalledProcessError:
+                log.seek(start)
+                error = None
+                for line in log:
+                    try:
+                        event = json.loads(line)
+                    except ValueError:
+                        continue
+                    if isinstance(event, dict) and event.get("type") == "error":
+                        error = event
+                log.seek(0, os.SEEK_END)
+                data = (error or {}).get("error", {}).get("data", {})
+                session = (error or {}).get("sessionID")
+                if data.get("statusCode") != 429 or not session or attempt == 3:
+                    raise
+                delay = 120 * 2 ** attempt + random.uniform(0, 30)
+                headers = data.get("responseHeaders") or {}
+                for name, scale in (("retry-after-ms", 0.001), ("retry-after", 1)):
+                    value = headers.get(name)
+                    if value is None:
+                        continue
+                    try:
+                        wait = float(value) * scale
+                    except (TypeError, ValueError):
+                        try:
+                            wait = parsedate_to_datetime(value).timestamp() - time.time()
+                        except (TypeError, ValueError, OverflowError):
+                            continue
+                    delay = max(delay, wait)
+                logger.warning(f"Report rate limited; waiting {delay:.0f}s before session retry {attempt + 1}/3")
+                time.sleep(delay)
+                # Keep the original HOME, working files and persisted session database.
+                command = [*base_command, "--session", session,
+                           "继续当前论文的图文解读，复用已有阅读结果和文件，完成 report.html。"]
+
+
 def generate_report(paper, llm_params, output_dir: Path) -> Path:
-    """Reuse the configured model; keep OpenCode's generation/retry defaults."""
+    """Reuse the configured model and resume sessions after sustained rate limits."""
     model = str(llm_params.generation_kwargs.model)
     responses = llm_params.get("api_mode", "chat_completion") == "response"
     provider = "openai" if responses else "daily"
@@ -83,11 +133,10 @@ def generate_report(paper, llm_params, output_dir: Path) -> Path:
             "OPENCODE_CONFIG_CONTENT": json.dumps(config),
             "OPENCODE_DISABLE_AUTOUPDATE": "1",
         })
-        with (output_dir / "agent.jsonl").open("w", encoding="utf-8") as log:
-            subprocess.run(
-                ["opencode", "run", "--model", selected_model, "--format", "json", "--dir", work, prompt],
-                cwd=work, env=env, stdout=log, stderr=subprocess.STDOUT, check=True,
-            )
+        _run_agent(
+            ["opencode", "run", "--model", selected_model, "--format", "json", "--dir", work, prompt],
+            work, env, output_dir / "agent.jsonl",
+        )
         report = output_dir / REPORT_FILENAME
         shutil.copyfile(Path(work) / "report.html", report)
         if not report.stat().st_size:
