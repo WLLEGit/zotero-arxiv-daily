@@ -5,7 +5,7 @@ from .utils import glob_match
 from .retriever import get_retriever_cls
 from .protocol import CorpusPaper
 import random
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 import json
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -255,8 +255,8 @@ class Executor:
             logger.error(f"Failed to save papers to Zotero: {e}")
 
     @staticmethod
-    def export_paper_index(papers: list, sources: list[str]) -> None:
-        """Export public candidates without Zotero data, scores or extra model calls."""
+    def export_paper_index(papers: list, sources: list[str], *, ranked=None, save_top_k=10) -> None:
+        """Export public candidates and optional reading order; no private corpus or model calls."""
         try:
             output = Path("outputs/paper-index.json")
             output.parent.mkdir(parents=True, exist_ok=True)
@@ -271,6 +271,12 @@ class Executor:
                     for paper in papers
                 ],
             }
+            if ranked is not None:
+                payload["recommendation_date"] = datetime.now(timezone(timedelta(hours=8))).date().isoformat()
+                payload["recommendations"] = [
+                    {"url": paper.url, "rank": rank, "selected_for_zotero": rank <= save_top_k}
+                    for rank, paper in enumerate(ranked, 1)
+                ]
             temporary = output.with_suffix(".tmp")
             temporary.write_text(json.dumps(payload, ensure_ascii=False) + "\n", encoding="utf-8")
             temporary.replace(output)
@@ -303,6 +309,10 @@ class Executor:
             reranked_papers = rerank_with_llm(
                 reranked_papers, self.openai_client, self.config.llm,
                 self.config.reranker.get("prompt"),
+            )
+            self.export_paper_index(
+                all_papers, list(self.retrievers), ranked=reranked_papers,
+                save_top_k=self.config.zotero.get("save_top_k", 10),
             )
             logger.info("Generating TLDR and affiliations...")
             for p in tqdm(reranked_papers):

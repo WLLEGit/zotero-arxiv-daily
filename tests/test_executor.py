@@ -304,3 +304,18 @@ def test_index_export_failure_is_nonfatal(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     (tmp_path / "outputs").write_text("blocks directory creation")
     Executor.export_paper_index([], ["arxiv"])
+
+
+def test_export_reading_order_reuses_zotero_selection(tmp_path, monkeypatch):
+    import json
+    from types import SimpleNamespace
+    monkeypatch.chdir(tmp_path)
+    papers = [SimpleNamespace(source="arxiv", title=str(i), url=f"https://arxiv.org/abs/2610.{i:05d}") for i in range(3)]
+    Executor.export_paper_index(papers, ["arxiv"], ranked=list(reversed(papers)), save_top_k=2)
+    data = json.loads((tmp_path / "outputs/paper-index.json").read_text())
+    assert len(data["recommendation_date"]) == 10
+    assert data["recommendations"] == [
+        {"url": p.url, "rank": i, "selected_for_zotero": i <= 2}
+        for i, p in enumerate(reversed(papers), 1)
+    ]
+    assert "score" not in data["papers"][0]
