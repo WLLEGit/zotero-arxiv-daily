@@ -319,3 +319,24 @@ def test_export_reading_order_reuses_zotero_selection(tmp_path, monkeypatch):
         for i, p in enumerate(reversed(papers), 1)
     ]
     assert "score" not in data["papers"][0]
+
+
+def test_managed_dry_run_cannot_send_or_write_zotero(config, monkeypatch, tmp_path):
+    from types import SimpleNamespace
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("DAILYARXIV_DRY_RUN", "1")
+    config.executor.send_empty = True
+    executor = Executor.__new__(Executor)
+    executor.config = config
+    executor.fetch_zotero_corpus = lambda: [object()]
+    executor.filter_corpus = lambda rows: rows
+    executor.retrievers = {"arxiv": SimpleNamespace(retrieve_papers=lambda: [])}
+    def forbidden(*args, **kwargs):
+        raise AssertionError("Dry run attempted an external delivery")
+    monkeypatch.setattr("zotero_arxiv_daily.executor.send_email", forbidden)
+    executor.save_to_zotero = forbidden
+    executor.run()
+    import json
+    payload = json.loads((tmp_path / "outputs/paper-index.json").read_text())
+    assert payload["reading"] == []
+    assert payload["recommendations"] == []

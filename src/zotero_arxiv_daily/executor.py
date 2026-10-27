@@ -5,6 +5,7 @@ from .utils import glob_match
 from .retriever import get_retriever_cls
 from .protocol import CorpusPaper
 import random
+import os
 from datetime import datetime, timezone, timedelta
 import json
 from pathlib import Path
@@ -195,6 +196,7 @@ class Executor:
         if type(top_k) is not int or top_k < 0:
             logger.error("zotero.save_top_k must be a non-negative integer")
             return
+        receipts = []
         papers = papers[:top_k]  # papers arrive sorted by relevance, descending
         if not papers:
             return
@@ -230,9 +232,12 @@ class Executor:
                                 parent = zot.item(parent_key)
                                 for identifier in identifiers:
                                     existing[identifier] = parent
+                        receipt = {"url": p.url, "parent_key": parent_key, "status": "parent_saved"}
+                        receipts.append(receipt)
                         if not reports_enabled or parent_key in queued:
                             continue
                         if has_report(zot.everything(zot.children(parent_key))):
+                            receipt["status"] = "existing"
                             logger.info(f"Illustrated report already exists for {p.url}; skipping")
                             continue
                         future = pool.submit(generate_report, p, self.config.llm, Path("outputs/reports") / parent_key)
@@ -240,19 +245,31 @@ class Executor:
                         queued.add(parent_key)
                     except Exception as e:
                         # A failed report leaves the parent eligible for a later retry.
+                        receipts.append({"url": p.url, "status": "failed", "error": type(e).__name__})
                         logger.warning(f"Failed to sync paper/report for {p.url}: {e}")
                 for future in as_completed(pending):
                     p, parent_key = pending[future]
                     try:
+                        receipt = next(r for r in receipts if r["url"] == p.url)
                         report = future.result()
+                        receipt["report_path"] = str(report)
                         if has_report(zot.everything(zot.children(parent_key))):
+                            receipt["status"] = "existing"
                             continue
                         key = upload_report(zot, parent_key, report, webdav, str(self.config.zotero.user_id))
+                        receipt.update(status="saved", attachment_key=key)
                         logger.info(f"Saved illustrated report attachment {key} for {p.url}")
                     except Exception as e:
+                        receipt.update(status="failed", error=type(e).__name__)
                         logger.warning(f"Failed to sync paper/report for {p.url}: {e}")
         except Exception as e:
+            receipts.append({"status": "failed", "error": type(e).__name__})
             logger.error(f"Failed to save papers to Zotero: {e}")
+        output = Path("outputs/zotero-results.json")
+        output.parent.mkdir(parents=True, exist_ok=True)
+        temporary = output.with_suffix(".tmp")
+        temporary.write_text(json.dumps(receipts, ensure_ascii=False), encoding="utf-8")
+        temporary.replace(output)
 
     @staticmethod
     def export_paper_index(papers: list, sources: list[str], *, ranked=None, save_top_k=10) -> None:
@@ -276,6 +293,12 @@ class Executor:
                 payload["recommendations"] = [
                     {"url": paper.url, "rank": rank, "selected_for_zotero": rank <= save_top_k}
                     for rank, paper in enumerate(ranked, 1)
+                ]
+            if ranked is not None:
+                payload["reading"] = [
+                    {"url": paper.url, **{field: getattr(paper, field, None)
+                     for field in ("score", "tldr", "affiliations")}}
+                    for paper in ranked
                 ]
             temporary = output.with_suffix(".tmp")
             temporary.write_text(json.dumps(payload, ensure_ascii=False) + "\n", encoding="utf-8")
@@ -320,6 +343,14 @@ class Executor:
                 p.generate_affiliations(self.openai_client, self.config.llm)
         elif not self.config.executor.send_empty:
             logger.info("No new papers found. No email will be sent.")
+            return
+        self.export_paper_index(
+            all_papers, list(self.retrievers), ranked=reranked_papers,
+            save_top_k=self.config.zotero.get("save_top_k", 10),
+        )
+        # Managed self-hosted validation must never send or write external data.
+        if os.environ.get("DAILYARXIV_DRY_RUN") == "1":
+            logger.info("Managed dry run: exported results; skipping email and Zotero writes")
             return
         logger.info("Sending email...")
         email_content = render_email(reranked_papers)
