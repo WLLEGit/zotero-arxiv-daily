@@ -2,6 +2,10 @@ name: Test
 on:
   workflow_dispatch:
 
+concurrency:
+  group: daily-arxiv-delivery
+  cancel-in-progress: false
+
 jobs:
   calculate-and-send:
     runs-on: ubuntu-latest
@@ -16,6 +20,12 @@ jobs:
         uses: astral-sh/setup-uv@v7.1.4
 
 
+      - name: Install report tools
+        run: |
+          npm install --global opencode-ai@1.19.3
+          sudo apt-get update
+          sudo apt-get install --yes librsvg2-bin
+
       - name: Run script
         env:
           ZOTERO_ID: ${{ secrets.ZOTERO_ID }}
@@ -29,6 +39,13 @@ jobs:
         run: |
           export DEBUG=true
           printf "%b\n" "$CUSTOM_CONFIG" > config/custom.yaml
-          echo "Use custom config: "
-          cat config/custom.yaml
           uv run src/zotero_arxiv_daily/main.py
+
+      - name: Save generated reports and agent logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: paper-reports
+          path: outputs/reports/
+          retention-days: 3
+          if-no-files-found: ignore

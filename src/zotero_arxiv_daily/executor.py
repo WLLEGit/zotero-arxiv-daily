@@ -5,12 +5,17 @@ from .utils import glob_match
 from .retriever import get_retriever_cls
 from .protocol import CorpusPaper
 import random
+import os
 from datetime import datetime
 from .reranker import get_reranker_cls
+from .reranker.llm import rerank_with_llm
 from .construct_email import render_email
 from .utils import send_email
 from openai import OpenAI
-from tqdm import tqdm
+from .metadata import enrich_papers
+from .outputs import export_paper_index
+from .reports import generate_reports
+from .zotero_sync import save_papers
 
 
 def normalize_path_patterns(patterns: list[str] | ListConfig | None, config_key: str) -> list[str] | None:
@@ -89,7 +94,6 @@ class Executor:
             logger.info(f"Selected {len(corpus)} zotero papers:\n{samples}\n...")
         return corpus
 
-    
     def run(self):
         corpus = self.fetch_zotero_corpus()
         corpus = self.filter_corpus(corpus)
@@ -106,19 +110,36 @@ class Executor:
             logger.info(f"Retrieved {len(papers)} {source} papers")
             all_papers.extend(papers)
         logger.info(f"Total {len(all_papers)} papers retrieved from all sources")
+        export_paper_index(all_papers, list(self.retrievers))
         reranked_papers = []
         if len(all_papers) > 0:
             logger.info("Reranking papers...")
             reranked_papers = self.reranker.rerank(all_papers, corpus)
             reranked_papers = reranked_papers[:self.config.executor.max_paper_num]
-            logger.info("Generating TLDR and affiliations...")
-            for p in tqdm(reranked_papers):
-                p.generate_tldr(self.openai_client, self.config.llm)
-                p.generate_affiliations(self.openai_client, self.config.llm)
+            reranked_papers = rerank_with_llm(
+                reranked_papers, self.openai_client, self.config.llm,
+                self.config.reranker.get("prompt"),
+            )
+            export_paper_index(
+                all_papers, list(self.retrievers), ranked=reranked_papers,
+                save_top_k=self.config.zotero.get("save_top_k", 10),
+            )
+            logger.info("Translating abstracts and generating affiliations...")
+            enrich_papers(reranked_papers, self.openai_client, self.config.llm)
         elif not self.config.executor.send_empty:
             logger.info("No new papers found. No email will be sent.")
+            return
+        export_paper_index(
+            all_papers, list(self.retrievers), ranked=reranked_papers,
+            save_top_k=self.config.zotero.get("save_top_k", 10),
+        )
+        # Managed self-hosted validation must never send or write external data.
+        if os.environ.get("DAILYARXIV_DRY_RUN") == "1":
+            logger.info("Managed dry run: exported results; skipping email and Zotero writes")
             return
         logger.info("Sending email...")
         email_content = render_email(reranked_papers)
         send_email(self.config, email_content)
         logger.info("Email sent successfully")
+        save_papers(reranked_papers, self.config.zotero)
+        generate_reports(reranked_papers, self.config.llm, self.config.zotero.get("save_top_k", 10))

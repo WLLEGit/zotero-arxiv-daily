@@ -6,6 +6,7 @@ import pytest
 from omegaconf import OmegaConf
 
 from zotero_arxiv_daily.executor import Executor, normalize_path_patterns
+from zotero_arxiv_daily.outputs import export_paper_index
 from zotero_arxiv_daily.protocol import CorpusPaper
 
 
@@ -281,3 +282,68 @@ def test_run_no_papers_send_empty_true(config, monkeypatch):
     assert len(sent) == 1, "Email should be sent even with no papers when send_empty=true"
     _, _, body = sent[0]
     assert "text/html" in body
+
+
+def test_export_all_public_candidates_without_private_fields(tmp_path, monkeypatch):
+    import json
+    from types import SimpleNamespace
+    monkeypatch.chdir(tmp_path)
+    papers = [SimpleNamespace(source="arxiv", title=f"Paper {i}", authors=["Author"],
+              abstract="Abstract", url=f"https://arxiv.org/abs/2610.{i:05d}", pdf_url=None,
+              score=0.7, full_text="not exported", paths=["private collection"])
+              for i in range(110)]
+    export_paper_index(papers, ["arxiv"])
+    data = json.loads((tmp_path / "outputs/paper-index.json").read_text())
+    assert data["status"] == "complete"
+    assert len(data["papers"]) == 110
+    assert set(data["papers"][0]) == {"source", "title", "authors", "abstract", "url", "pdf_url"}
+    export_paper_index([], ["arxiv"])
+    assert json.loads((tmp_path / "outputs/paper-index.json").read_text())["papers"] == []
+
+
+def test_index_export_failure_is_nonfatal(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "outputs").write_text("blocks directory creation")
+    export_paper_index([], ["arxiv"])
+
+
+def test_export_reading_order_reuses_zotero_selection(tmp_path, monkeypatch):
+    import json
+    from types import SimpleNamespace
+    monkeypatch.chdir(tmp_path)
+    papers = [SimpleNamespace(source="arxiv", title=str(i), url=f"https://arxiv.org/abs/2610.{i:05d}") for i in range(3)]
+    export_paper_index(papers, ["arxiv"], ranked=list(reversed(papers)), save_top_k=2)
+    data = json.loads((tmp_path / "outputs/paper-index.json").read_text())
+    assert len(data["recommendation_date"]) == 10
+    assert data["recommendations"] == [
+        {"url": p.url, "rank": i, "selected_for_zotero": i <= 2}
+        for i, p in enumerate(reversed(papers), 1)
+    ]
+    assert "score" not in data["papers"][0]
+
+
+def test_managed_dry_run_cannot_send_or_write_zotero(config, monkeypatch, tmp_path):
+    from types import SimpleNamespace
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("DAILYARXIV_DRY_RUN", "1")
+    config.executor.send_empty = True
+    executor = Executor.__new__(Executor)
+    executor.config = config
+    executor.fetch_zotero_corpus = lambda: [object()]
+    executor.filter_corpus = lambda rows: rows
+    executor.retrievers = {"arxiv": SimpleNamespace(retrieve_papers=lambda: [])}
+    def forbidden(*args, **kwargs):
+        raise AssertionError("Dry run attempted an external delivery")
+    monkeypatch.setattr("zotero_arxiv_daily.executor.send_email", forbidden)
+    monkeypatch.setattr("zotero_arxiv_daily.executor.save_papers", forbidden)
+    monkeypatch.setattr("zotero_arxiv_daily.executor.generate_reports", forbidden)
+    executor.run()
+    import json
+    payload = json.loads((tmp_path / "outputs/paper-index.json").read_text())
+    assert payload["reading"] == []
+    assert payload["recommendations"] == []
+
+
+@pytest.fixture(autouse=True)
+def stub_local_reports_in_executor_tests(monkeypatch):
+    monkeypatch.setattr('zotero_arxiv_daily.executor.generate_reports', lambda *args: None)

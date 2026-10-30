@@ -3,6 +3,8 @@ zotero:
   api_key: ??? # An Zotero API key with read access.
   include_path: null # A list of glob patterns marking the Zotero collections that should be included. Example: ["2026/survey/**","2026/reading-group/**"]
   ignore_path: null # A list of glob patterns marking the Zotero collections that should be excluded. Example: ["2026/ignore/**","archive/**"]
+  save_collection: null # Existing sync destination; null disables Zotero writes.
+  save_top_k: 10 # Number of selected papers for metadata sync and local reports.
 
 source:
   arxiv:
@@ -34,6 +36,7 @@ llm:
   language: English # Preferred language for the TL;DR. Example: English
 
 reranker:
+  prompt: null # Optional reading preferences for LLM reranking; null keeps embedding order.
   local:
     model: jinaai/jina-embeddings-v5-text-nano-retrieval # The Hugging Face model name of the local embedding model. Example: jinaai/jina-embeddings-v5-text-nano
     encode_kwargs:

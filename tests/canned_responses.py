@@ -1,6 +1,7 @@
 """Shared stub factories for tests. No unittest.mock anywhere."""
 
 from datetime import datetime
+import json
 from types import SimpleNamespace
 
 from zotero_arxiv_daily.protocol import CorpusPaper, Paper
@@ -34,6 +35,8 @@ def _make_chat_response(content: str) -> SimpleNamespace:
 def _stub_chat_create(**kwargs):
     messages = kwargs.get("messages", [])
     request_str = str(messages)
+    if 'paper_beginning' in request_str:
+        return _make_chat_response(json.dumps({'translation':_TLDR_RESPONSE,'affiliations':json.loads(_AFFILIATION_RESPONSE)}))
     if _AFFILIATION_MARKER in request_str:
         return _make_chat_response(_AFFILIATION_RESPONSE)
     return _make_chat_response(_TLDR_RESPONSE)
@@ -41,6 +44,8 @@ def _stub_chat_create(**kwargs):
 
 def _stub_response_create(**kwargs):
     request_str = str(kwargs.get("input", []))
+    if 'paper_beginning' in request_str:
+        return SimpleNamespace(output_text=json.dumps({'translation':_TLDR_RESPONSE,'affiliations':json.loads(_AFFILIATION_RESPONSE)}))
     content = _AFFILIATION_RESPONSE if _AFFILIATION_MARKER in request_str else _TLDR_RESPONSE
     return SimpleNamespace(output_text=content)
 

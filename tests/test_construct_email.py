@@ -76,3 +76,10 @@ def test_get_block_html_contains_all_fields():
 def test_get_empty_html():
     html = get_empty_html()
     assert "No Papers Today" in html
+
+
+def test_translated_abstract_keeps_comparison_symbols_as_text():
+    html = get_block_html("Title", "Auth", "3.5", "KV cache < 2 GB & TTFT > 1 s", "http://pdf.url")
+    assert "KV cache &lt; 2 GB &amp; TTFT &gt; 1 s" in html
+    assert "<strong>Abstract:</strong>" in html
+    assert "TLDR:" not in html

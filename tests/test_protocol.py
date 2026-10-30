@@ -33,7 +33,7 @@ def test_tldr_without_abstract_or_fulltext(llm_params):
     client = make_stub_openai_client()
     paper = make_sample_paper(abstract="", full_text=None)
     result = paper.generate_tldr(client, llm_params)
-    assert "Failed to generate TLDR" in result
+    assert result == ""
 
 
 def test_tldr_falls_back_to_abstract_on_error(llm_params):
@@ -51,11 +51,33 @@ def test_tldr_falls_back_to_abstract_on_error(llm_params):
     assert result == paper.abstract
 
 
-def test_tldr_truncates_long_prompt(llm_params):
-    client = make_stub_openai_client()
-    paper = make_sample_paper(full_text="word " * 10000)
-    result = paper.generate_tldr(client, llm_params)
-    assert result is not None
+@pytest.mark.parametrize("language,instruction", [
+    ("Chinese", "请将以下论文摘要翻译成中文。"),
+    ("English", "Translate the following paper abstract into English."),
+])
+def test_translation_uses_full_abstract_only(llm_params, monkeypatch, language, instruction):
+    llm_params["language"] = language
+    paper = make_sample_paper(title="Excluded title", abstract="word " * 6000,
+                              full_text="Excluded full text")
+    received = []
+    def request(client, params, messages):
+        received.extend(messages)
+        return "译文"
+    monkeypatch.setattr("zotero_arxiv_daily.protocol._request_llm", request)
+    assert paper.generate_tldr(None, llm_params) == "译文"
+    assert received == [{"role": "user", "content": instruction + "\n\n" + paper.abstract}]
+
+
+def test_missing_abstract_does_not_translate_full_text(llm_params, monkeypatch):
+    def forbidden(*args):raise AssertionError("No abstract should not call the model")
+    monkeypatch.setattr("zotero_arxiv_daily.protocol._request_llm", forbidden)
+    assert make_sample_paper(abstract="",full_text="Full text").generate_tldr(None,llm_params)==""
+
+
+def test_empty_translation_keeps_original_abstract(llm_params, monkeypatch):
+    monkeypatch.setattr("zotero_arxiv_daily.protocol._request_llm", lambda *args: "")
+    paper = make_sample_paper()
+    assert paper.generate_tldr(None,llm_params)==paper.abstract
 
 
 def test_response_mode_maps_max_tokens(llm_params):
