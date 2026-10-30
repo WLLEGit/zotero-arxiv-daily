@@ -165,9 +165,11 @@ executor:
   reranker: local # The reranker to use. Example: 'local' or 'api'
 ```
 
-To enable an additional LLM reading-priority pass, set `reranker.prompt` in `CUSTOM_CONFIG` to a multiline description of your interests. It reuses `llm` and promotes up to 20 papers from all retrieved candidates, before applying the final `executor.max_paper_num` delivery limit; the remaining papers keep their embedding order. Email and Zotero use the same final order. `Relevance` remains the original embedding score, not an LLM score. Empty prompts or failed/invalid responses preserve the embedding order.
+To enable personalized LLM reading-priority ranking, set `reranker.prompt` to your research interests. The managed reader also supplies a bounded set of explicit likes, dislikes and reasons as `reranker.feedback_examples`; no manual configuration of examples is needed. Both reuse the existing `llm` model and client.
 
-For example, a systems researcher can request both directly relevant systems work and new AI architectures or modules that suggest future changes in memory access, communication, scheduling, or hardware needs. The prompt can express different priorities for deep reading and a quick look at a method. It only affects papers already in the candidate pool; it does not broaden the subscribed sources or recover papers outside the subscribed categories.
+Ranking uses [RankLLM](https://github.com/castorini/rank_llm) 0.26's listwise prompt and permutation repair. Every retrieved candidate is considered in groups of up to 100, with five concurrent requests. Group finalists are compared together before the final `executor.max_paper_num` delivery limit. The finalist budget covers the delivery count and keeps at least 20 per group. Duplicate/unknown response IDs are removed while valid choices are preserved. A completely unusable response is retried once; API failures or repeated unusable responses fail the ranking stage rather than silently substituting embedding order. Empty preferences and no feedback keep the original embedding-only workflow. `Relevance` remains the original embedding score, not an LLM score.
+
+Preferences may cover directly relevant systems work and new AI architectures or modules that suggest future changes in memory access, communication, scheduling or hardware needs. Reader feedback describes interest, not paper quality. Automatic recommendations and clicks are not treated as positive feedback. The ranking only covers subscribed sources and categories.
 
 That's all! Now you can test the workflow by manually triggering it:
 ![test](./assets/test.png)

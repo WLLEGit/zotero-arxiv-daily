@@ -36,6 +36,7 @@ llm:
   language: English # Preferred language for the TL;DR. Example: English
 
 reranker:
+  feedback_examples: [] # Automatically supplied by the self-hosted reader.
   prompt: null # Optional reading preferences for LLM reranking; null keeps embedding order.
   local:
     model: jinaai/jina-embeddings-v5-text-nano-retrieval # The Hugging Face model name of the local embedding model. Example: jinaai/jina-embeddings-v5-text-nano

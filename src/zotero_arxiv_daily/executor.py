@@ -118,6 +118,8 @@ class Executor:
             reranked_papers = rerank_with_llm(
                 reranked_papers, self.openai_client, self.config.llm,
                 self.config.reranker.get("prompt"),
+                self.config.reranker.get("feedback_examples"),
+                limit=self.config.executor.max_paper_num,
             )
             reranked_papers = reranked_papers[:self.config.executor.max_paper_num]
             export_paper_index(
