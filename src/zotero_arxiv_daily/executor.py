@@ -115,11 +115,11 @@ class Executor:
         if len(all_papers) > 0:
             logger.info("Reranking papers...")
             reranked_papers = self.reranker.rerank(all_papers, corpus)
-            reranked_papers = reranked_papers[:self.config.executor.max_paper_num]
             reranked_papers = rerank_with_llm(
                 reranked_papers, self.openai_client, self.config.llm,
                 self.config.reranker.get("prompt"),
             )
+            reranked_papers = reranked_papers[:self.config.executor.max_paper_num]
             export_paper_index(
                 all_papers, list(self.retrievers), ranked=reranked_papers,
                 save_top_k=self.config.zotero.get("save_top_k", 10),

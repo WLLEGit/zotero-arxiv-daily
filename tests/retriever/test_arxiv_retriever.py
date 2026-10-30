@@ -252,3 +252,40 @@ def test_retrieve_raw_papers_retries_on_http_failure(config, mock_feedparser, mo
     assert len(calls) == 2
     assert len(raw) > 0
 
+
+
+def test_capped_combined_feed_fetches_categories_and_deduplicates(config, monkeypatch):
+    from feedparser import FeedParserDict
+    config.source.arxiv.category = ['cs.AI', 'cs.OS']
+    config.source.arxiv.include_cross_list = True
+    calls = []
+
+    def entry(pid, kind='new'):
+        return FeedParserDict(id=f'oai:arXiv.org:{pid}', title=pid,
+                              summary='Abstract', arxiv_announce_type=kind)
+
+    shared = entry('2610.00001', 'cross')
+    feeds = {
+        'cs.AI+cs.OS': [shared] * 2000,
+        'cs.AI': [shared, entry('2610.00002')],
+        'cs.OS': [shared, entry('2610.00003'), entry('2610.00004', 'replace')],
+    }
+
+    def parse(url):
+        query = url.rsplit('/', 1)[-1]
+        calls.append(query)
+        return SimpleNamespace(feed=SimpleNamespace(title='arXiv'), entries=feeds[query], bozo=False)
+
+    monkeypatch.setattr(arxiv_retriever.feedparser, 'parse', parse)
+    papers = ArxivRetriever(config)._retrieve_raw_papers()
+    assert calls == ['cs.AI+cs.OS', 'cs.AI', 'cs.OS']
+    assert [p.get_short_id() for p in papers] == ['2610.00001', '2610.00002', '2610.00003']
+
+
+def test_capped_single_category_is_not_silently_accepted(config, monkeypatch):
+    import pytest
+    config.source.arxiv.category = ['cs.AI']
+    feed = SimpleNamespace(feed=SimpleNamespace(title='arXiv'), entries=[{}] * 2000, bozo=False)
+    monkeypatch.setattr(arxiv_retriever.feedparser, 'parse', lambda url: feed)
+    with pytest.raises(RuntimeError, match='2,000-entry limit'):
+        ArxivRetriever(config)._retrieve_raw_papers()

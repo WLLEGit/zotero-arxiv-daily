@@ -89,7 +89,8 @@ def test_response_protocol_reuses_existing_client(config):
     assert seen[0]['max_output_tokens'] == 4096 and 'max_tokens' not in seen[0]
 
 
-def test_email_and_zotero_share_final_order_after_shortlisting(config, monkeypatch):
+@pytest.mark.parametrize("model_failure", [False, True])
+def test_full_pool_rerank_then_delivery_limit(config, monkeypatch, model_failure):
     config.reranker.prompt = 'Architectures and systems inspiration'
     config.executor.max_paper_num = 3
     all_papers = candidates(25)
@@ -105,9 +106,11 @@ def test_email_and_zotero_share_final_order_after_shortlisting(config, monkeypat
     def request(client, params, messages):
         events.append('rerank')
         rows = json.loads(messages[1]['content'])['papers']
-        assert {r['title'] for r in rows} == {'Paper 0', 'Paper 1', 'Paper 2'}
+        assert {r['title'] for r in rows} == {f'Paper {i}' for i in range(25)}
+        if model_failure:
+            raise RuntimeError('Rate limited')
         ids = {r['title']: r['id'] for r in rows}
-        return json.dumps({'ranking': [ids['Paper 2'], ids['Paper 0'], ids['Paper 1']]})
+        return json.dumps({'ranking': [ids[f'Paper {i}'] for i in range(24, 4, -1)]})
 
     monkeypatch.setattr('zotero_arxiv_daily.reranker.llm._request_llm', request)
     monkeypatch.setattr('zotero_arxiv_daily.executor.enrich_papers', lambda rows, *args: events.extend('metadata:' + p.title for p in rows))
@@ -116,5 +119,5 @@ def test_email_and_zotero_share_final_order_after_shortlisting(config, monkeypat
     monkeypatch.setattr('zotero_arxiv_daily.executor.save_papers', lambda papers, config: events.append(('zotero', [p.title for p in papers])))
     monkeypatch.setattr('zotero_arxiv_daily.executor.generate_reports', lambda *args: None)
     executor.run()
-    expected = ['Paper 2', 'Paper 0', 'Paper 1']
+    expected = ['Paper 0', 'Paper 1', 'Paper 2'] if model_failure else ['Paper 24', 'Paper 23', 'Paper 22']
     assert events == ['rerank', *['metadata:' + title for title in expected], ('email', expected), ('zotero', expected)]

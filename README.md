@@ -144,7 +144,7 @@ llm:
   language: English # Preferred language for the TL;DR. Example: English
 
 reranker:
-  prompt: null # Optional reading preferences; reuse llm to rerank the shortlist.
+  prompt: null # Optional reading preferences; reuse llm to rerank all retrieved candidates.
   local:
     model: jinaai/jina-embeddings-v5-text-nano # The Hugging Face model name of the local embedding model. Example: jinaai/jina-embeddings-v5-text-nano
     encode_kwargs:
@@ -165,9 +165,9 @@ executor:
   reranker: local # The reranker to use. Example: 'local' or 'api'
 ```
 
-To enable an additional LLM reading-priority pass, set `reranker.prompt` in `CUSTOM_CONFIG` to a multiline description of your interests. It reuses `llm` and promotes up to 20 papers from the embedding-selected `executor.max_paper_num` candidates; the remaining papers keep their embedding order. Email and Zotero use the same final order. `Relevance` remains the original embedding score, not an LLM score. Empty prompts or failed/invalid responses preserve the embedding order.
+To enable an additional LLM reading-priority pass, set `reranker.prompt` in `CUSTOM_CONFIG` to a multiline description of your interests. It reuses `llm` and promotes up to 20 papers from all retrieved candidates, before applying the final `executor.max_paper_num` delivery limit; the remaining papers keep their embedding order. Email and Zotero use the same final order. `Relevance` remains the original embedding score, not an LLM score. Empty prompts or failed/invalid responses preserve the embedding order.
 
-For example, a systems researcher can request both directly relevant systems work and new AI architectures or modules that suggest future changes in memory access, communication, scheduling, or hardware needs. The prompt can express different priorities for deep reading and a quick look at a method. It only affects papers already in the candidate pool; it does not broaden the subscribed sources or recover papers outside the shortlist.
+For example, a systems researcher can request both directly relevant systems work and new AI architectures or modules that suggest future changes in memory access, communication, scheduling, or hardware needs. The prompt can express different priorities for deep reading and a quick look at a method. It only affects papers already in the candidate pool; it does not broaden the subscribed sources or recover papers outside the subscribed categories.
 
 That's all! Now you can test the workflow by manually triggering it:
 ![test](./assets/test.png)

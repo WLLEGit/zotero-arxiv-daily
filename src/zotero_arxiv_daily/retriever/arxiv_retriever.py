@@ -214,9 +214,7 @@ class ArxivRetriever(BaseRetriever):
         if self.config.source.arxiv.category is None:
             raise ValueError("category must be specified for arxiv.")
 
-    def _retrieve_raw_papers(self) -> list[ArxivResult]:
-        query = '+'.join(self.config.source.arxiv.category)
-        include_cross_list = self.config.source.arxiv.get("include_cross_list", False)
+    def _fetch_feed(self, query: str):
         rss_url = f"https://rss.arxiv.org/atom/{query}"
 
         # Get latest papers from arxiv RSS feed with retry
@@ -256,9 +254,27 @@ class ArxivRetriever(BaseRetriever):
                 f"(status={status}, bozo_exception={bozo_exc})"
             )
 
+        return feed
+
+    def _retrieve_raw_papers(self) -> list[ArxivResult]:
+        categories = self.config.source.arxiv.category
+        feed = self._fetch_feed('+'.join(categories))
+        entries = feed.entries
+        # Combined arXiv feeds have a 2,000-entry limit, including replacements.
+        if len(entries) >= 2000:
+            if len(categories) == 1:
+                raise RuntimeError("arXiv category feed reached its 2,000-entry limit")
+            logger.warning("Combined arXiv feed reached its limit; fetching categories separately")
+            entries = []
+            for category in categories:
+                category_feed = self._fetch_feed(category)
+                if len(category_feed.entries) >= 2000:
+                    raise RuntimeError(f"arXiv category feed reached its 2,000-entry limit: {category}")
+                entries.extend(category_feed.entries)
+        include_cross_list = self.config.source.arxiv.get("include_cross_list", False)
         allowed_announce_types = {"new", "cross"} if include_cross_list else {"new"}
         target_entries = [
-            i for i in feed.entries
+            i for i in entries
             if i.get("arxiv_announce_type", "new") in allowed_announce_types
         ]
         if self.config.executor.debug:

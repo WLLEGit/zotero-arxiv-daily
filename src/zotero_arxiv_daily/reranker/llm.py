@@ -1,4 +1,4 @@
-"""Optional reading-priority rerank after embedding-based candidate selection."""
+"""Optional reading-priority rerank over all retrieved candidates in embedding order."""
 
 import json
 import random
