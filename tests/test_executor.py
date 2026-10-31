@@ -347,3 +347,75 @@ def test_managed_dry_run_cannot_send_or_write_zotero(config, monkeypatch, tmp_pa
 @pytest.fixture(autouse=True)
 def stub_local_reports_in_executor_tests(monkeypatch):
     monkeypatch.setattr('zotero_arxiv_daily.executor.generate_reports', lambda *args: None)
+
+
+@pytest.mark.parametrize('phase', ['collections', 'items', 'pagination'])
+def test_zotero_read_retries_network_failure_from_fresh_client(config, monkeypatch, phase):
+    import httpx
+    from types import SimpleNamespace
+    from tests.canned_responses import make_stub_zotero_client
+    clients, delays, closed = [], [], []
+    def factory(*args, **kwargs):
+        stub = make_stub_zotero_client()
+        clients.append(stub)
+        stub.client = SimpleNamespace(close=lambda: closed.append(stub))
+        if len(clients) == 1:
+            def fail(*args, **kwargs):
+                raise httpx.ConnectError('[SSL: UNEXPECTED_EOF_WHILE_READING]')
+            if phase == 'pagination':
+                original = stub.everything
+                calls = []
+                def everything(value):
+                    calls.append(1)
+                    if len(calls) == 2: fail()
+                    return original(value)
+                stub.everything = everything
+            else:
+                setattr(stub, phase, fail)
+        return stub
+    monkeypatch.setattr('zotero_arxiv_daily.executor.zotero.Zotero', factory)
+    monkeypatch.setattr('zotero_arxiv_daily.executor.sleep', delays.append)
+    executor = Executor.__new__(Executor); executor.config = config
+    corpus = executor.fetch_zotero_corpus()
+    assert len(corpus) == 2 and len({p.title for p in corpus}) == 2
+    assert len(clients) == 2 and len(closed) == 2 and delays == [5]
+
+
+@pytest.mark.parametrize('kind', ['transport', 'server'])
+def test_zotero_read_retry_exhaustion_is_bounded(config, monkeypatch, kind):
+    import httpx
+    from pyzotero import zotero_errors
+    from types import SimpleNamespace
+    from tests.canned_responses import make_stub_zotero_client
+    attempts, delays = [], []
+    error = httpx.ReadTimeout('Timed out') if kind == 'transport' else zotero_errors.HTTPError('Temporary server failure')
+    def factory(*args, **kwargs):
+        attempts.append(1); stub = make_stub_zotero_client()
+        stub.request = SimpleNamespace(status_code=503)
+        def fail(): raise error
+        stub.collections = fail
+        return stub
+    monkeypatch.setattr('zotero_arxiv_daily.executor.zotero.Zotero', factory)
+    monkeypatch.setattr('zotero_arxiv_daily.executor.sleep', delays.append)
+    executor = Executor.__new__(Executor); executor.config = config
+    with pytest.raises(type(error)): executor.fetch_zotero_corpus()
+    assert len(attempts) == 4 and delays == [5, 15, 30]
+
+
+@pytest.mark.parametrize('status', [401, 403, 404])
+def test_zotero_read_does_not_retry_permanent_http_errors(config, monkeypatch, status):
+    from pyzotero import zotero_errors
+    from types import SimpleNamespace
+    from tests.canned_responses import make_stub_zotero_client
+    attempts = []
+    def factory(*args, **kwargs):
+        attempts.append(1); stub = make_stub_zotero_client()
+        stub.request = SimpleNamespace(status_code=status)
+        def fail(): raise zotero_errors.HTTPError('Permanent request error')
+        stub.collections = fail
+        return stub
+    monkeypatch.setattr('zotero_arxiv_daily.executor.zotero.Zotero', factory)
+    monkeypatch.setattr('zotero_arxiv_daily.executor.sleep', lambda _: pytest.fail('Permanent errors must not sleep'))
+    executor = Executor.__new__(Executor); executor.config = config
+    with pytest.raises(zotero_errors.HTTPError): executor.fetch_zotero_corpus()
+    assert len(attempts) == 1

@@ -1,5 +1,7 @@
 from loguru import logger
-from pyzotero import zotero
+from pyzotero import zotero, zotero_errors
+import httpx
+from time import sleep
 from omegaconf import DictConfig, ListConfig
 from .utils import glob_match
 from .retriever import get_retriever_cls
@@ -46,10 +48,26 @@ class Executor:
         self.openai_client = OpenAI(api_key=config.llm.api.key, base_url=config.llm.api.base_url)
     def fetch_zotero_corpus(self) -> list[CorpusPaper]:
         logger.info("Fetching zotero corpus")
-        zot = zotero.Zotero(self.config.zotero.user_id, 'user', self.config.zotero.api_key)
-        collections = zot.everything(zot.collections())
+        for attempt in range(4):
+            zot = zotero.Zotero(self.config.zotero.user_id, 'user', self.config.zotero.api_key)
+            try:
+                collections = zot.everything(zot.collections())
+                corpus = zot.everything(zot.items(itemType='conferencePaper || journalArticle || preprint'))
+                break
+            except (httpx.TransportError, zotero_errors.HTTPError) as exc:
+                status = getattr(getattr(zot, 'request', None), 'status_code', None)
+                if isinstance(exc, zotero_errors.HTTPError) and (status is None or status < 500):
+                    raise
+                if attempt == 3:
+                    raise
+                delay = (5, 15, 30)[attempt]
+                logger.warning(f'Zotero corpus read failed ({type(exc).__name__}); retry {attempt+2}/4 in {delay}s')
+                sleep(delay)
+            finally:
+                client = getattr(zot, 'client', None)
+                if client is not None:
+                    client.close()
         collections = {c['key']:c for c in collections}
-        corpus = zot.everything(zot.items(itemType='conferencePaper || journalArticle || preprint'))
         corpus = [c for c in corpus if c['data']['abstractNote'] != '']
         def get_collection_path(col_key:str) -> str:
             if p := collections[col_key]['data']['parentCollection']:
