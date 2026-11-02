@@ -16,7 +16,9 @@ def candidates(count):
 
 
 @pytest.fixture(autouse=True)
-def offline_token_budget(monkeypatch):
+def offline_token_budget(monkeypatch,tmp_path):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr('zotero_arxiv_daily.reranker.llm.sleep',lambda _:None)
     # Tokenizer downloads are unrelated to permutation and protocol behavior.
     monkeypatch.setattr(ReaderRanker,'get_num_tokens',lambda *args:1000)
     monkeypatch.setattr(ReaderRanker,'num_output_tokens',lambda *args:1000)
@@ -29,11 +31,12 @@ def passage_numbers(messages):
 
 def test_rankllm_keeps_valid_order_deduplicates_and_ignores_unknown_ids(config,monkeypatch):
     papers=candidates(5);before=copy.deepcopy(papers);params=copy.deepcopy(config.llm)
+    replies=iter(['[5] > [3] > [5] > [999] > [1]','[5] > [3] > [1] > [2] > [4]'])
     def request(client,p,messages):
         assert p['generation_kwargs']['temperature']==0
         assert 'Preferences' in messages[1]['content']
         assert 'Paper 4' in str(messages) and 'Abstract 4' in str(messages)
-        return '[5] > [3] > [5] > [999] > [1]'
+        return next(replies)
     monkeypatch.setattr('zotero_arxiv_daily.reranker.llm._request_llm',request)
     ranked=rerank_with_llm(papers,object(),config.llm,'Preferences')
     assert [p.title for p in ranked]==['Paper 4','Paper 2','Paper 0','Paper 1','Paper 3']
@@ -57,7 +60,7 @@ def test_unusable_response_retries_and_never_silently_falls_back(config,monkeypa
     monkeypatch.setattr('zotero_arxiv_daily.reranker.llm._request_llm',request)
     with pytest.raises(RuntimeError,match='no usable'):
         rerank_with_llm(candidates(3),object(),config.llm,'Preferences')
-    assert len(calls)==2
+    assert len(calls)==6
 
 
 def test_transient_bad_format_can_recover(config,monkeypatch):
@@ -116,7 +119,7 @@ def test_delivery_uses_final_order_and_preserves_feedback(config,monkeypatch):
     def request(client,params,messages):
         assert 'TileBench' in str(messages)
         assert len(passage_numbers(messages))==25
-        return '[25] > [24] > [23] > [25]'
+        return ' > '.join(f'[{i}]' for i in range(25,0,-1))
     monkeypatch.setattr('zotero_arxiv_daily.reranker.llm._request_llm',request)
     monkeypatch.setattr('zotero_arxiv_daily.executor.enrich_papers',lambda rows,*args:events.append(('metadata',[p.title for p in rows])))
     monkeypatch.setattr('zotero_arxiv_daily.executor.render_email',lambda papers:[p.title for p in papers])
@@ -126,3 +129,105 @@ def test_delivery_uses_final_order_and_preserves_feedback(config,monkeypatch):
     executor.run()
     expected=['Paper 24','Paper 23','Paper 22']
     assert events==[(stage,expected) for stage in ['metadata','email','zotero','reports']]
+
+
+def test_checkpoint_resume_avoids_successful_model_calls(config,monkeypatch):
+    import gzip,json
+    from pathlib import Path
+    from zotero_arxiv_daily.reranker.checkpoint import load_papers
+    papers=candidates(3);papers[0].full_text='Extracted affiliation evidence'
+    def request(client,params,messages):return '[3] > [2] > [1]'
+    monkeypatch.setattr('zotero_arxiv_daily.reranker.llm._request_llm',request)
+    first=rerank_with_llm(papers,object(),config.llm,'Preferences')
+    restored=load_papers()
+    assert restored[0].full_text==papers[0].full_text and restored[0].score==papers[0].score
+    monkeypatch.setattr('zotero_arxiv_daily.reranker.llm._request_llm',lambda *a:pytest.fail('Completed checkpoint was not reused'))
+    assert [p.url for p in rerank_with_llm(restored,object(),config.llm,'Preferences')]==[p.url for p in first]
+    payload=json.loads(gzip.decompress(Path('outputs/rerank/input.json.gz').read_bytes()))
+    assert 'sk-fake' not in json.dumps(payload) and 'api' not in payload
+
+
+def test_failed_group_recovers_with_smaller_overlapping_llm_windows(config,monkeypatch):
+    seen=[];waits=[]
+    def request(client,params,messages):
+        ids=passage_numbers(messages);seen.append(len(ids))
+        if len(ids)>2:return 'not a ranking'
+        return ' > '.join(f'[{i}]' for i in reversed(ids))
+    monkeypatch.setattr('zotero_arxiv_daily.reranker.llm._request_llm',request)
+    monkeypatch.setattr('zotero_arxiv_daily.reranker.llm.sleep',waits.append)
+    ranked=rerank_with_llm(candidates(4),object(),config.llm,'Preferences')
+    assert seen[:3]==[4,4,4] and all(n==2 for n in seen[3:])
+    assert waits==[15,45] and len({p.url for p in ranked})==4
+
+
+def test_diagnostics_capture_actual_finish_reason_and_usage(config):
+    import json
+    from pathlib import Path
+    class Usage:
+        def model_dump(self):return {'completion_tokens':12}
+    def create(**kwargs):
+        return SimpleNamespace(id='response-fixture',model='fixture',usage=Usage(),
+            choices=[SimpleNamespace(finish_reason='stop',message=SimpleNamespace(content='[2] > [1]',reasoning_content='reasoning'))])
+    client=SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
+    rerank_with_llm(candidates(2),client,config.llm,'Preferences')
+    record=json.loads(next(Path('outputs/rerank').glob('*-attempt-*.json')).read_text())
+    assert record['finish_reason']=='stop' and record['usage']['completion_tokens']==12
+    assert record['reasoning_content']=='reasoning' and record['valid_ids']==[2,1]
+    assert 'sk-fake' not in json.dumps(record)
+
+
+def test_resume_preserves_other_successful_groups_after_one_group_fails(config,monkeypatch):
+    from zotero_arxiv_daily.reranker.checkpoint import fingerprint
+    state={'fail':True};successful=[];second=[]
+    def request(client,params,messages):
+        ids=passage_numbers(messages)
+        if state['fail'] and re.search(r'Paper 0\b',str(messages)):return 'not a ranking'
+        if state['fail'] and len(ids)==100:successful.append(fingerprint(messages))
+        if not state['fail']:second.append(fingerprint(messages))
+        return ' > '.join(f'[{i}]' for i in reversed(ids))
+    monkeypatch.setattr('zotero_arxiv_daily.reranker.llm._request_llm',request)
+    papers=candidates(200)
+    with pytest.raises(RuntimeError):rerank_with_llm(papers,object(),config.llm,'Preferences')
+    assert successful
+    state['fail']=False
+    ranked=rerank_with_llm(papers,object(),config.llm,'Preferences')
+    assert len(ranked)==200 and not set(successful)&set(second)
+
+
+def test_changed_preferences_invalidate_cached_ranking(config,monkeypatch):
+    calls=[]
+    def request(*args):calls.append(1);return '[2] > [1]'
+    monkeypatch.setattr('zotero_arxiv_daily.reranker.llm._request_llm',request)
+    papers=candidates(2)
+    rerank_with_llm(papers,object(),config.llm,'Preferences')
+    rerank_with_llm(papers,object(),config.llm,'Changed preferences')
+    assert len(calls)==2
+
+
+def test_connection_failures_wait_and_record_before_recovering(config,monkeypatch):
+    import httpx,json
+    from pathlib import Path
+    calls=[];waits=[]
+    def request(*args):
+        calls.append(1)
+        if len(calls)<3:raise httpx.ReadTimeout('fixture timeout')
+        return '[2] > [1]'
+    monkeypatch.setattr('zotero_arxiv_daily.reranker.llm._request_llm',request)
+    monkeypatch.setattr('zotero_arxiv_daily.reranker.llm.sleep',waits.append)
+    assert rerank_with_llm(candidates(2),object(),config.llm,'Preferences')[0].title=='Paper 1'
+    assert waits==[15,45] and len(calls)==3
+    records=[json.loads(p.read_text()) for p in Path('outputs/rerank').glob('*-attempt-*.json')]
+    assert sum(r.get('error_type')=='ReadTimeout' for r in records)==2
+    assert all('at' in r for r in records)
+
+
+def test_permanent_model_auth_error_is_not_retried(config,monkeypatch):
+    import httpx
+    from openai import AuthenticationError
+    calls=[]
+    def request(*args):
+        calls.append(1)
+        raise AuthenticationError('fixture',response=httpx.Response(401,request=httpx.Request('POST','https://example.test')),body=None)
+    monkeypatch.setattr('zotero_arxiv_daily.reranker.llm._request_llm',request)
+    with pytest.raises(AuthenticationError):rerank_with_llm(candidates(2),object(),config.llm,'Preferences')
+    assert len(calls)==1

@@ -1,3 +1,4 @@
+from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Optional, TypeVar
 from datetime import datetime
@@ -9,6 +10,20 @@ import json
 RawPaperItem = TypeVar('RawPaperItem')
 
 
+# Request-local observer used only by ranking diagnostics, including concurrent groups.
+llm_observer = ContextVar('llm_observer',default=None)
+
+def _observe(response,text,choice=None):
+    observer=llm_observer.get()
+    if observer is not None:
+        usage=getattr(response,'usage',None)
+        observer({'response_id':getattr(response,'id',None),'request_id':getattr(response,'_request_id',None),
+                  'model':getattr(response,'model',None),'finish_reason':getattr(choice,'finish_reason',getattr(response,'status',None)),
+                  'usage':usage.model_dump() if hasattr(usage,'model_dump') else None,
+                  'content':text,'reasoning_content':getattr(getattr(choice,'message',None),'reasoning_content',None)})
+    return text
+
+
 def _request_llm(openai_client: OpenAI, llm_params: dict, messages: list[dict]) -> str:
     api_mode = llm_params.get("api_mode", "chat_completion")
     generation_kwargs = dict(llm_params.get("generation_kwargs", {}))
@@ -18,7 +33,7 @@ def _request_llm(openai_client: OpenAI, llm_params: dict, messages: list[dict]) 
             messages=messages,
             **generation_kwargs,
         )
-        return response.choices[0].message.content
+        return _observe(response,response.choices[0].message.content,response.choices[0])
 
     if api_mode == "response":
         max_tokens = generation_kwargs.pop("max_tokens", None)
@@ -28,7 +43,7 @@ def _request_llm(openai_client: OpenAI, llm_params: dict, messages: list[dict]) 
             input=messages,
             **generation_kwargs,
         )
-        return response.output_text
+        return _observe(response,response.output_text)
 
     raise ValueError(
         f"Unsupported llm.api_mode: {api_mode}. "
