@@ -50,8 +50,9 @@ def stable_item_key(identity: str) -> str:
 
 
 def _run_agent(command: list[str], work: str, env: dict, log_path: Path) -> None:
-    """Resume transient failures in place; retain each attempt and completed files."""
-    base_command = command[:-1]
+    """Retry failures in place except explicit authentication/configuration errors."""
+    base_command, initial_prompt = command[:-1], command[-1]
+    session = None
     with log_path.open("a+", encoding="utf-8") as log:
         log_path.chmod(0o600)
         for attempt in range(4):
@@ -77,7 +78,6 @@ def _run_agent(command: list[str], work: str, env: dict, log_path: Path) -> None
                 logger.warning('Agent ended with an error after completing report.html; retaining the report')
                 return
             error = None
-            session = None
             for line in segment.splitlines():
                 try:
                     event = json.loads(line)
@@ -88,14 +88,19 @@ def _run_agent(command: list[str], work: str, env: dict, log_path: Path) -> None
                 session = event.get('sessionID') or session
                 if event.get("type") == "error":
                     error = event
-            data = (error or {}).get("error", {}).get("data", {})
+            detail = (error or {}).get("error") or {}
+            data = detail.get("data") or {}
             status = data.get('statusCode')
             message = str(data.get('message', '')).lower()
-            transient = (status in {429, 500, 502, 503, 504}
-                         or isinstance(failure, FileNotFoundError)
-                         or any(s in message for s in ('upstream_stream_read_error',
-                             'upstream_http2_stream_error', 'socket connection', 'cannot connect to api')))
-            if not transient or not session or attempt == 3 or status in {400, 401, 403, 404}:
+            permanent = (
+                status in {400, 401, 402, 403, 404, 405, 422}
+                or detail.get('name') in {'ConfigInvalidError', 'ConfigJsonError',
+                    'ProviderModelNotFoundError', 'ModelNotFoundError', 'AuthenticationError', 'PermissionDeniedError'}
+                or any(s in message for s in ('invalid api key', 'incorrect api key',
+                    'missing api key', 'permission denied', 'model not found', 'unknown model'))
+                or isinstance(failure, FileNotFoundError) and failure.filename is not None
+            )
+            if permanent or attempt == 3:
                 raise failure
             delay = (15, 45, 90)[attempt]
             if status == 429:
@@ -115,8 +120,10 @@ def _run_agent(command: list[str], work: str, env: dict, log_path: Path) -> None
                     delay = max(delay, wait)
             logger.warning(f"Report interrupted; waiting {delay:.0f}s before session retry {attempt + 1}/3")
             time.sleep(delay)
-            command = [*base_command, "--session", session,
-                       "继续当前论文的图文解读，复用已有阅读结果和文件，完成 report.html 写入和图片内嵌后直接交付。"]
+            continuation = "继续当前论文的图文解读，复用已有阅读结果和文件，完成 report.html 写入和图片内嵌后直接交付。"
+            command = ([*base_command, "--session", session, continuation] if session else
+                       [*base_command, initial_prompt + "\n\n" + continuation])
+
 
 
 def generate_report(paper, llm_params, output_dir: Path) -> Path:

@@ -156,8 +156,8 @@ def test_rate_limit_waits_and_resumes_same_session(config, monkeypatch, tmp_path
 
 
 @pytest.mark.parametrize("status,session,attempts", [(429, "ses_existing", 4),
-    (401, "ses_existing", 1), (500, "ses_existing", 4), (429, None, 1)])
-def test_report_retry_is_bounded_and_requires_transient_error_and_session(config, monkeypatch, tmp_path, status, session, attempts):
+    (401, "ses_existing", 1), (500, "ses_existing", 4), (429, None, 4)])
+def test_report_retry_is_bounded_without_requiring_a_session(config, monkeypatch, tmp_path, status, session, attempts):
     calls, waits = [], []
     monkeypatch.setattr(reports.time, "sleep", waits.append)
     monkeypatch.setattr(reports.random, "uniform", lambda *args: 0)
@@ -187,7 +187,8 @@ def test_prior_429_does_not_retry_a_later_permanent_error(config, monkeypatch, t
             kwargs["stdout"].write(json.dumps({"type": "error", "sessionID": "ses_existing",
                 "error": {"data": {"statusCode": 429}}}) + "\n")
         else:
-            kwargs["stdout"].write("Unstructured permanent failure\n")
+            kwargs["stdout"].write(json.dumps({"type": "error", "sessionID": "ses_existing",
+                "error": {"data": {"statusCode": 401}}}) + "\n")
         raise subprocess.CalledProcessError(1, command)
 
     monkeypatch.setattr(reports.subprocess, "run", run)
@@ -232,3 +233,75 @@ def test_complete_report_survives_tail_error_and_internal_log_is_retained(config
     monkeypatch.setattr(reports.subprocess, 'run', run)
     assert reports.generate_report(papers(1)[0], config.llm, tmp_path).is_file()
     assert '[redacted]' in next((tmp_path/'diagnostics').glob('*.log')).read_text()
+
+
+@pytest.mark.parametrize('message', ["Expected 'function.name' to be a string.",
+    '{"message":"Upstream request failed","type":"upstream_error"}', 'An unforeseen failure'])
+def test_unknown_failures_resume_existing_session(config, monkeypatch, tmp_path, message):
+    calls, waits = [], []
+    monkeypatch.setattr(reports.time, 'sleep', waits.append)
+    def run(command, **kwargs):
+        calls.append(command)
+        if len(calls) == 1:
+            Path(kwargs['cwd'], 'evidence.txt').write_text('keep evidence')
+            kwargs['stdout'].write(json.dumps({'type':'error','sessionID':'ses_existing',
+                'error':{'name':'UnknownError','data':{'message':message}}}) + '\n')
+            raise subprocess.CalledProcessError(1, command)
+        assert command[-3:-1] == ['--session', 'ses_existing']
+        assert Path(kwargs['cwd'], 'evidence.txt').read_text() == 'keep evidence'
+        Path(kwargs['cwd'], 'report.html').write_text('<html>Recovered</html>')
+    monkeypatch.setattr(reports.subprocess, 'run', run)
+    assert reports.generate_report(papers(1)[0], config.llm, tmp_path).exists()
+    assert len(calls) == 2 and waits == [15]
+
+
+@pytest.mark.parametrize('detail', [
+    {'data':{'statusCode':code}} for code in (400,401,402,403,404,405,422)
+] + [{'name':'ConfigInvalidError'}, {'name':'ProviderModelNotFoundError'},
+     {'data':{'message':'Invalid API key'}}, {'data':{'message':'Permission denied'}}])
+def test_explicit_permanent_errors_stop_immediately(config, monkeypatch, tmp_path, detail):
+    def run(command, **kwargs):
+        kwargs['stdout'].write(json.dumps({'type':'error','sessionID':'ses_existing','error':detail}) + '\n')
+        raise subprocess.CalledProcessError(1, command)
+    monkeypatch.setattr(reports.subprocess, 'run', run)
+    monkeypatch.setattr(reports.time, 'sleep', lambda _: pytest.fail('Permanent failures must not wait/retry'))
+    with pytest.raises(subprocess.CalledProcessError):
+        reports.generate_report(papers(1)[0], config.llm, tmp_path)
+
+
+def test_missing_agent_executable_is_not_retried(config, monkeypatch, tmp_path):
+    def run(command, **kwargs): raise FileNotFoundError(2, 'No such executable', 'opencode')
+    monkeypatch.setattr(reports.subprocess, 'run', run)
+    monkeypatch.setattr(reports.time, 'sleep', lambda _: pytest.fail('Missing executable is a configuration failure'))
+    with pytest.raises(FileNotFoundError): reports.generate_report(papers(1)[0], config.llm, tmp_path)
+
+
+def test_no_session_retries_in_same_workspace_with_original_paper_prompt(config, monkeypatch, tmp_path):
+    calls=[]
+    monkeypatch.setattr(reports.time,'sleep',lambda _:None)
+    def run(command,**kwargs):
+        calls.append((command,kwargs['cwd'],kwargs['env']))
+        if len(calls)==1:
+            Path(kwargs['cwd'],'evidence.txt').write_text('downloaded')
+            raise subprocess.CalledProcessError(1,command)
+        assert calls[0][1:]==calls[1][1:]
+        assert '--session' not in command
+        assert calls[0][0][-1] in command[-1]
+        assert Path(kwargs['cwd'],'evidence.txt').read_text()=='downloaded'
+        Path(kwargs['cwd'],'report.html').write_text('Recovered')
+    monkeypatch.setattr(reports.subprocess,'run',run)
+    assert reports.generate_report(papers(1)[0],config.llm,tmp_path).exists()
+
+
+def test_unknown_failures_are_bounded_and_preserve_last_known_session(config, monkeypatch, tmp_path):
+    calls,waits=[],[]
+    monkeypatch.setattr(reports.time,'sleep',waits.append)
+    def run(command,**kwargs):
+        calls.append(command)
+        if len(calls)==1:
+            kwargs['stdout'].write(json.dumps({'type':'text','sessionID':'ses_existing'})+'\n')
+        else: assert command[-3:-1]==['--session','ses_existing']
+        raise subprocess.CalledProcessError(1,command)
+    monkeypatch.setattr(reports.subprocess,'run',run)
+    with pytest.raises(subprocess.CalledProcessError): reports.generate_report(papers(1)[0],config.llm,tmp_path)
+    assert len(calls)==4 and waits==[15,45,90]
