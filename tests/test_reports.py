@@ -1,5 +1,7 @@
 """Local report generation, concurrency and retry boundaries; no real model calls."""
 import copy
+import os
+import sys
 import json
 from pathlib import Path
 import threading
@@ -154,8 +156,8 @@ def test_rate_limit_waits_and_resumes_same_session(config, monkeypatch, tmp_path
 
 
 @pytest.mark.parametrize("status,session,attempts", [(429, "ses_existing", 4),
-    (401, "ses_existing", 1), (500, "ses_existing", 1), (429, None, 1)])
-def test_report_retry_is_bounded_and_only_for_resumable_429(config, monkeypatch, tmp_path, status, session, attempts):
+    (401, "ses_existing", 1), (500, "ses_existing", 4), (429, None, 1)])
+def test_report_retry_is_bounded_and_requires_transient_error_and_session(config, monkeypatch, tmp_path, status, session, attempts):
     calls, waits = [], []
     monkeypatch.setattr(reports.time, "sleep", waits.append)
     monkeypatch.setattr(reports.random, "uniform", lambda *args: 0)
@@ -170,7 +172,7 @@ def test_report_retry_is_bounded_and_only_for_resumable_429(config, monkeypatch,
     with pytest.raises(subprocess.CalledProcessError):
         reports.generate_report(papers(1)[0], config.llm, tmp_path)
     assert len(calls) == attempts
-    assert waits == [120, 240, 480][:attempts - 1]
+    assert waits == ([120, 240, 480] if status == 429 else [15, 45, 90])[:attempts - 1]
     assert not (tmp_path / reports.REPORT_FILENAME).exists()
 
 
@@ -192,3 +194,41 @@ def test_prior_429_does_not_retry_a_later_permanent_error(config, monkeypatch, t
     with pytest.raises(subprocess.CalledProcessError):
         reports.generate_report(papers(1)[0], config.llm, tmp_path)
     assert len(calls) == 2 and waits == [120]
+
+
+@pytest.mark.parametrize('failure', ['stream', 'missing'])
+def test_resume_preserves_files_after_stream_error_or_missing_report(config, monkeypatch, tmp_path, failure):
+    calls, waits = [], []
+    monkeypatch.setattr(reports.time, 'sleep', waits.append)
+    def run(command, **kwargs):
+        work = Path(kwargs['cwd'])
+        assert work.is_relative_to(tmp_path)
+        assert kwargs['env']['TMPDIR'] == str(work)
+        assert kwargs['env']['PATH'].split(os.pathsep)[0] == str(Path(sys.executable).parent)
+        calls.append(command)
+        kwargs['stdout'].write(json.dumps({'type': 'error' if failure == 'stream' else 'text', 'sessionID': 'ses_reuse',
+            'error': {'data': {'message': 'upstream_stream_read_error'}}}) + '\n')
+        if len(calls) == 1:
+            (work / 'evidence.txt').write_text('downloaded paper')
+            if failure == 'stream': raise subprocess.CalledProcessError(1, command)
+        else:
+            assert command[-3:-1] == ['--session', 'ses_reuse']
+            assert (work / 'evidence.txt').read_text() == 'downloaded paper'
+            (work / 'report.html').write_text('<html>中文报告</html>')
+    monkeypatch.setattr(reports.subprocess, 'run', run)
+    assert reports.generate_report(papers(1)[0], config.llm, tmp_path).is_file()
+    assert len(calls) == 2 and waits == [15]
+    assert len(list(tmp_path.glob('agent-*-attempt-*.jsonl'))) == 2
+
+
+def test_complete_report_survives_tail_error_and_internal_log_is_retained(config, monkeypatch, tmp_path):
+    def run(command, **kwargs):
+        work = Path(kwargs['cwd'])
+        (work / 'report.html').write_text('<html>' + '中文详细解读' * 100 + '<img src="data:image/png;base64,eA=="></html>')
+        logs = Path(kwargs['env']['HOME']) / '.local/share/opencode/log'
+        logs.mkdir(parents=True)
+        (logs / 'internal.log').write_text('error with ' + str(config.llm.api.key))
+        raise subprocess.CalledProcessError(1, command)
+    monkeypatch.setattr(reports.subprocess, 'run', run)
+    assert reports.generate_report(papers(1)[0], config.llm, tmp_path).is_file()
+    assert '[redacted]' in next((tmp_path/'diagnostics').glob('*.log')).read_text()
