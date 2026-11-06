@@ -240,6 +240,10 @@ The existing `zotero.save_top_k` (default 10) also selects illustrated reports.
 Reports run with five workers after email delivery, reuse the existing LLM
 configuration, and use the prompt in
 [`report_prompt.txt`](src/zotero_arxiv_daily/report_prompt.txt).
+Each report workspace automatically loads the pinned upstream English
+[humanizer rules](src/zotero_arxiv_daily/humanizer/README.md) for Chinese prose
+editing, retaining established English technical terms. No extra configuration
+or runtime skill download is required.
 Local runs require OpenCode on PATH. Reports are saved locally and never uploaded
 to Zotero or WebDAV. `zotero.save_collection` independently controls metadata-only
 Zotero sync. Existing library items and user notes remain untouched.

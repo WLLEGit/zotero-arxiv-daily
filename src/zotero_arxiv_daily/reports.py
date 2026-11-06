@@ -136,6 +136,7 @@ def generate_report(paper, llm_params, output_dir: Path) -> Path:
         "model": selected_model,
         "small_model": selected_model,
         "enabled_providers": [provider],
+        "instructions": ["humanizer.md"],
         "provider": {provider: {
             "npm": "@ai-sdk/openai" if responses else "@ai-sdk/openai-compatible",
             "options": {"baseURL": str(llm_params.api.base_url), "apiKey": "{env:REPORT_API_KEY}"},
@@ -151,6 +152,8 @@ def generate_report(paper, llm_params, output_dir: Path) -> Path:
     inherited = {"PATH", "LANG", "LC_ALL", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "SSL_CERT_FILE", "NODE_EXTRA_CA_CERTS"}
     # outputs lives on the data disk in self-hosted runs, not the shared 1 GB /tmp.
     with TemporaryDirectory(prefix=".work-", dir=output_dir.resolve()) as work:
+        shutil.copyfile(Path(__file__).with_name("humanizer") / "SKILL.md",
+                        Path(work) / "humanizer.md")
         home = Path(work) / ".home"
         home.mkdir()
         env = {key: value for key, value in os.environ.items() if key in inherited}

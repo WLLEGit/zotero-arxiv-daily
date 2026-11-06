@@ -114,6 +114,11 @@ def test_agent_reuses_model_and_does_not_receive_other_credentials(config, monke
         assert "ZOTERO_KEY" not in env and "SENDER_PASSWORD" not in env
         assert env["REPORT_API_KEY"] == config.llm.api.key
         settings = json.loads(env["OPENCODE_CONFIG_CONTENT"])
+        assert settings["instructions"] == ["humanizer.md"]
+        skill = Path(kwargs["cwd"], settings["instructions"][0])
+        assert skill.read_bytes() == (Path(reports.__file__).with_name("humanizer") / "SKILL.md").read_bytes()
+        assert "name: humanizer\n" in skill.read_text()
+        assert "humanizer" in command[-1] and "英文技术术语" in command[-1]
         assert settings["model"] == f"{provider}/{config.llm.generation_kwargs.model}"
         options = settings["provider"][provider]["options"]
         assert options["baseURL"] == config.llm.api.base_url
